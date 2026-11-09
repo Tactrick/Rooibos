@@ -1,0 +1,146 @@
+import sqlite3
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from rooibos_db.database import initialize_database, check_integrity
+from rooibos_collectors import (
+    CollectorFramework, CollectorPolicyError, EndpointPolicy, InvalidRunTransition,
+)
+from rooibos_a6.parser import ParseContext, normalise_records
+from rooibos_a6.storage import persist_parse_result
+
+
+class CollectorFrameworkTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db = Path(self.tmp.name) / 'moby_market.db'
+        initialize_database(self.db)
+        c = sqlite3.connect(self.db)
+        c.execute("INSERT INTO sources(source_id,source_name,source_type) VALUES ('moby','Moby','api')")
+        c.execute("INSERT INTO source_endpoints(endpoint_id,source_id,endpoint_name,method,path) VALUES ('ohlcv','moby','get_token_ohlcv','GET','/token/ohlcv')")
+        c.execute("INSERT INTO collectors(collector_id,collector_name,module_code,version) VALUES ('A6','A6 OHLCV','A6','1.0.0')")
+        c.execute("INSERT INTO assets(asset_id,chain,token_address,symbol) VALUES ('asset1','solana','MintABC','TST')")
+        c.commit(); c.close()
+        self.policy = EndpointPolicy(
+            source_id='moby',endpoint_id='ohlcv',endpoint_name='get_token_ohlcv',method='GET',
+            path='/token/ohlcv',allowed_parameter_keys=frozenset({'mint','interval','limit'}),
+            validated=True,max_limit=100,
+        )
+        self.framework = CollectorFramework(self.db,[self.policy])
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def create_run(self):
+        self.framework.create_run(
+            run_id='run1',collector_id='A6',source_id='moby',endpoint_id='ohlcv',
+            collector_version='1.0.0',requested_scope={'mint':'MintABC','interval':'15m','limit':2},
+            started_at='2026-11-09T10:00:00Z',
+        )
+
+    def test_create_run_and_request_ticket_capture_raw_before_parse(self):
+        self.create_run()
+        self.framework.transition('run1','configured')
+        ticket = self.framework.authorise_request('run1',{'mint':'MintABC','interval':'15m','limit':2})
+        self.assertEqual(ticket.request_sequence,0)
+        raw_hash = self.framework.capture_response(
+            ticket,raw_response_id='raw1',payload={'synthetic':True},http_status=200,
+            retrieved_at='2026-11-09T10:00:01Z',page_sequence=0,
+        )
+        self.assertTrue(raw_hash)
+        c = sqlite3.connect(self.db)
+        raw = c.execute('SELECT request_id,request_params_json FROM raw_responses WHERE raw_response_id=?',('raw1',)).fetchone()
+        run = c.execute('SELECT status,request_count,response_count FROM collection_runs WHERE run_id=?',('run1',)).fetchone()
+        c.close()
+        self.assertEqual(raw[0],ticket.request_id)
+        self.assertEqual(run,('raw_captured',1,1))
+        self.framework.transition('run1','parsed')
+        context = ParseContext(
+            chain='solana',asset_id='asset1',mint_address='MintABC',interval='15m',source_id='moby',
+            endpoint_id='ohlcv',collection_run_id='run1',raw_response_ref='raw1',
+        )
+        records = [{'timestamp_ms':1794225600000,'open':1,'high':1.2,'low':.9,'close':1.1,'volume':10,'candle_status':'closed'}]
+        result = normalise_records(records,context)
+        persisted = persist_parse_result(self.db,result=result,raw_response_id='raw1')
+        self.assertEqual(persisted['inserted_count'],1)
+        c = sqlite3.connect(self.db)
+        self.assertEqual(c.execute('SELECT status FROM collection_runs WHERE run_id=?',('run1',)).fetchone()[0],'normalised')
+        c.close()
+        self.assertTrue(check_integrity(self.db)['ok'])
+
+    def test_unknown_endpoint_is_default_denied(self):
+        framework = CollectorFramework(self.db,[])
+        with self.assertRaises(CollectorPolicyError):
+            framework.create_run(
+                run_id='run1',collector_id='A6',source_id='moby',endpoint_id='ohlcv',
+                collector_version='1',requested_scope={},
+            )
+
+    def test_unvalidated_candidate_is_denied(self):
+        candidate = EndpointPolicy(
+            source_id='moby',endpoint_id='ohlcv',endpoint_name='get_token_ohlcv',method='GET',
+            path='/token/ohlcv',allowed_parameter_keys=frozenset({'mint'}),validated=False,
+        )
+        framework = CollectorFramework(self.db,[candidate])
+        with self.assertRaises(CollectorPolicyError):
+            framework.create_run(
+                run_id='run1',collector_id='A6',source_id='moby',endpoint_id='ohlcv',
+                collector_version='1',requested_scope={},
+            )
+
+    def test_trading_endpoint_rejected_even_if_marked_validated(self):
+        policy = EndpointPolicy(
+            source_id='moby',endpoint_id='ohlcv',endpoint_name='quick_buy',method='GET',
+            path='/buy',allowed_parameter_keys=frozenset(),validated=True,
+        )
+        framework = CollectorFramework(self.db,[policy])
+        with self.assertRaises(CollectorPolicyError):
+            framework.create_run(
+                run_id='run1',collector_id='A6',source_id='moby',endpoint_id='ohlcv',
+                collector_version='1',requested_scope={},
+            )
+
+    def test_endpoint_database_mismatch_is_denied(self):
+        wrong = EndpointPolicy(
+            source_id='moby',endpoint_id='ohlcv',endpoint_name='other_endpoint',method='GET',
+            path='/other',allowed_parameter_keys=frozenset(),validated=True,
+        )
+        framework = CollectorFramework(self.db,[wrong])
+        with self.assertRaises(CollectorPolicyError):
+            framework.create_run(
+                run_id='run1',collector_id='A6',source_id='moby',endpoint_id='ohlcv',
+                collector_version='1',requested_scope={},
+            )
+
+    def test_request_parameter_allowlist_and_limit_are_enforced(self):
+        self.create_run(); self.framework.transition('run1','configured')
+        with self.assertRaises(CollectorPolicyError):
+            self.framework.authorise_request('run1',{'mint':'MintABC','secret':'x'})
+        with self.assertRaises(CollectorPolicyError):
+            self.framework.authorise_request('run1',{'mint':'MintABC','limit':101})
+        with self.assertRaises(CollectorPolicyError):
+            self.framework.authorise_request('run1',{'mint':'MintABC','limit':True})
+
+    def test_invalid_lifecycle_transition_is_rejected(self):
+        self.create_run()
+        with self.assertRaises(InvalidRunTransition):
+            self.framework.transition('run1','completed')
+        self.framework.transition('run1','configured')
+        self.framework.transition('run1','collecting')
+        self.framework.transition('run1','failed')
+        with self.assertRaises(InvalidRunTransition):
+            self.framework.transition('run1','collecting')
+
+    def test_request_cannot_be_issued_before_run_is_configured(self):
+        self.create_run()
+        with self.assertRaises(InvalidRunTransition):
+            self.framework.authorise_request('run1',{'mint':'MintABC'})
+
+
+if __name__ == '__main__':
+    unittest.main()

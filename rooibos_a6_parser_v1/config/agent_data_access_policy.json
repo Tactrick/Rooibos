@@ -1,0 +1,67 @@
+{
+  "policy_id": "rooibos-agent-data-access",
+  "policy_version": "0.1.0",
+  "status": "proposed_not_deployed",
+  "default_effect": "deny",
+  "agents": ["alpha", "beta", "gamma"],
+  "evidence_access": {
+    "entrypoint": "agent_evidence_service",
+    "a13_gate_required": true,
+    "resolve_snapshot_membership_server_side": true,
+    "resolve_hashes_server_side": true,
+    "allowed_decisions": ["approved_for_research"],
+    "warning_approval_default": "deny",
+    "warning_opt_in_requires_trusted_policy": true,
+    "fail_closed_on_service_unavailability": true,
+    "max_grant_ttl_seconds": 300,
+    "cache_requires_reauthorization": true,
+    "cache_scope_fields": [
+      "agent_identity",
+      "snapshot_id",
+      "snapshot_content_hash",
+      "assessment_hash",
+      "policy_version",
+      "dataset_type",
+      "requested_scope",
+      "grant_expiry"
+    ]
+  },
+  "isolation": {
+    "separate_agent_service_identity": true,
+    "separate_agent_workspace": true,
+    "private_cognition_store": true,
+    "direct_database_access": false,
+    "raw_collector_access": false,
+    "direct_a13_decision_write": false,
+    "cross_agent_private_memory_access": false
+  },
+  "submissions": {
+    "direct_database_write": false,
+    "controlled_submission_api_required": true,
+    "append_only_versioning": true,
+    "attachments_executable_by_default": false,
+    "automatic_code_execution": false
+  },
+  "collaboration": {
+    "blind_first_pass": true,
+    "freeze_before_peer_review": true,
+    "automatic_peer_memory_copy": false,
+    "preserve_dissent": true
+  },
+  "capabilities": {
+    "network_access": "default_deny_allowlist_only",
+    "shell_or_process_execution": false,
+    "moby_credentials": false,
+    "wallet_access": false,
+    "live_trading": false,
+    "swap_or_order_tools": false,
+    "automatic_paper_position_creation": false
+  },
+  "audit": {
+    "log_grants_and_denials": true,
+    "log_snapshot_and_hash_references": true,
+    "log_policy_version": true,
+    "agent_modifiable": false,
+    "secrets_in_logs": false
+  }
+}

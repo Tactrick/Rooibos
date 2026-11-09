@@ -1,0 +1,18 @@
+Rooibos pipeline v1.8.0 verification
+
+- Full unit/integration suite: 97 tests passed.
+- Python compileall: passed.
+- Fresh ZIP extraction and complete test rerun: 97 tests passed.
+- ZIP integrity test: passed; 60 packaged files.
+- Migration chain: 001-008 applied successfully.
+- Migrations 001-007 SHA-256 checksums: exact match to v1.7.0 baseline.
+- Existing v1.7 example database upgraded in place to migration 008: passed.
+- Upgraded example database integrity_check: ok; foreign_key_check: zero violations.
+- Database filename remains moby_market.db.
+
+Scope limitations:
+- Local tests use synthetic fixtures; no production source or endpoint is approved.
+- No live collection, Moby calls, wallet operations or trading actions performed.
+- No production retention duration configured and no evidence purge/deletion implemented.
+- Chart Engine and agent runtime are not deployed or proven to have no direct-read bypasses.
+- Existing snapshots require explicit lifecycle registration and raw-response linkage before the default A13 read gate will authorize them.
