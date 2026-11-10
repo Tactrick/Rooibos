@@ -86,6 +86,31 @@ class A13PipelineIntegrationTests(unittest.TestCase):
                 expected_assessments_hash=decision.assessments_hash,
                 allowed_policy_versions={decision.policy_version}, now="2026-11-09T10:03:00Z")
 
+    def test_a13_assessments_and_decision_roll_back_as_one_unit(self):
+        ctx = DiscoveryContext("solana", MINT, "fixture_source", "fixture_endpoint",
+            "run-atomic", "raw-atomic", 7, "2026-11-09T10:00:00Z")
+        record = project_a1(normalize_a1(ctx, {"symbol":"SOL"},
+            field_map={"symbol":"symbol"}))
+        # Force the immutable decision insert to fail after assessment staging.
+        self.conn.execute("""INSERT INTO a13_snapshot_decisions
+            (snapshot_id,dataset_type,record_ids_json,dataset_status,assessments_hash,
+             findings_json,decided_at,policy_version,snapshot_content_hash)
+            VALUES ('snap-atomic','a1_discovery','["different-record"]','approved_for_research',
+                    'old-assessments','[]','2026-11-09T10:00:00Z',
+                    'a13-governance/0.1.0','old-snapshot-hash')""")
+        before = self.conn.execute(
+            "SELECT COUNT(*) FROM a13_record_assessments").fetchone()[0]
+        with self.assertRaises(ValueError):
+            assess_and_store_snapshot(self.conn, [record], snapshot_id="snap-atomic",
+                source_policies=POLICIES, assessed_at="2026-11-09T10:01:00Z",
+                decided_at="2026-11-09T10:02:00Z")
+        after = self.conn.execute(
+            "SELECT COUNT(*) FROM a13_record_assessments").fetchone()[0]
+        self.assertEqual(after, before)
+        self.assertEqual(self.conn.execute(
+            "SELECT record_ids_json FROM a13_snapshot_decisions WHERE snapshot_id='snap-atomic'"
+        ).fetchone()[0], '["different-record"]')
+
     def test_read_gate_rejects_altered_record_membership(self):
         ctx = DiscoveryContext("solana", MINT, "fixture_source", "fixture_endpoint", "run-a1",
                                "raw-a1", 0, "2026-11-09T10:00:00Z")
