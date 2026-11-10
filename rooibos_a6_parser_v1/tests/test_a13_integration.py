@@ -87,9 +87,12 @@ class A13PipelineIntegrationTests(unittest.TestCase):
                 allowed_policy_versions={decision.policy_version}, now="2026-11-09T10:03:00Z")
 
     def test_a13_warnings_are_quarantined_unless_explicitly_allowed(self):
-        ctx = DiscoveryContext("solana", MINT, "fixture_source", "fixture_endpoint",
-            "run-warning", "raw-warning", 0, "2026-11-09T10:00:00Z")
-        record = project_a1(normalize_a1(ctx, {}, field_map={}))
+        context = ParseContext("solana", "asset-warning", MINT, "15m",
+            "fixture_source", "fixture_endpoint", "run-warning", "raw-warning",
+            volume_unit="base_token")
+        parsed = normalise_records([{"timestamp_ms":1794229200000,"open":1.0,
+            "high":1.2,"low":0.9,"close":1.1,"volume":12.0}], context)
+        record = project_a6(parsed.candles[0], observed_at="2026-11-09T10:00:00Z")
         assessments, denied = assess_and_store_snapshot(self.conn, [record],
             snapshot_id="snap-warning-default", source_policies=POLICIES,
             assessed_at="2026-11-09T10:01:00Z", decided_at="2026-11-09T10:02:00Z")
