@@ -107,6 +107,49 @@ def project_a6_from_storage(conn, candle_id: str):
         ))
     return records
 
+
+def publish_a6_snapshot_from_storage(conn, candle_ids, *, snapshot_id: str,
+                                     source_policies: Mapping[str, SourcePolicy],
+                                     assessed_at: str, decided_at: str,
+                                     effective_at: str, actor_id: str, reason: str,
+                                     allow_warnings: bool = False,
+                                     expected_record_ids: set[str] | None = None):
+    """Assemble, assess, register and gate an A6 snapshot from persisted storage.
+
+    No lifecycle publication occurs unless A13 persisted an approved decision.
+    The read gate then verifies exact membership, snapshot hash, lifecycle and
+    the complete set of raw-response links before returning a grant.
+    """
+    from rooibos_a13.lifecycle import register_snapshot_for_records
+
+    ids = list(candle_ids)
+    if not ids or len(ids) != len(set(ids)):
+        raise ValueError("A6 snapshot requires a non-empty unique candle ID set")
+    records = []
+    for candle_id in ids:
+        records.extend(project_a6_from_storage(conn, candle_id))
+    assessments, decision = assess_and_store_snapshot(
+        conn, records, snapshot_id=snapshot_id, source_policies=source_policies,
+        assessed_at=assessed_at, decided_at=decided_at,
+        allow_warnings=allow_warnings, expected_record_ids=expected_record_ids,
+    )
+    if decision.dataset_status not in ("approved_for_research", "approved_with_warnings"):
+        return records, assessments, decision, None
+
+    register_snapshot_for_records(
+        conn, snapshot_id=snapshot_id, event_id=snapshot_id + ":registered",
+        effective_at=effective_at, actor_id=actor_id, reason=reason, records=records,
+    )
+    from rooibos_a13.read_gate import authorize_snapshot
+    grant = authorize_snapshot(
+        conn, snapshot_id=snapshot_id, records=records,
+        expected_snapshot_hash=snapshot_content_hash(records),
+        expected_assessments_hash=decision.assessments_hash,
+        allowed_policy_versions={decision.policy_version},
+        allow_warnings=allow_warnings, now=effective_at,
+    )
+    return records, assessments, decision, grant
+
 def assess_and_store_snapshot(conn, records: Iterable[EvidenceRecord], *, snapshot_id: str,
                               source_policies: Mapping[str, SourcePolicy], assessed_at: str,
                               decided_at: str, allow_warnings: bool = False,
