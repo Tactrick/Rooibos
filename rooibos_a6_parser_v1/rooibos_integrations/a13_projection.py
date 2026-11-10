@@ -139,7 +139,8 @@ def publish_a6_snapshot_from_storage(conn, candle_ids, *, snapshot_id: str,
             commit=False,
         )
         if decision.dataset_status not in ("approved_for_research", "approved_with_warnings"):
-            conn.execute("ROLLBACK TO SAVEPOINT a13_publish_a6_snapshot")
+            # Persist the quarantine decision and its assessments as an auditable
+            # outcome, but publish no lifecycle event or raw-evidence links.
             conn.execute("RELEASE SAVEPOINT a13_publish_a6_snapshot")
             if owns_transaction:
                 conn.commit()
