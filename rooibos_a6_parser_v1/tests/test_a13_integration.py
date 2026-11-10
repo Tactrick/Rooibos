@@ -26,9 +26,9 @@ class A13PipelineIntegrationTests(unittest.TestCase):
     def tearDown(self):
         self.conn.close(); self.tmp.cleanup()
 
-    def test_migration_chain_001_to_008_and_legacy_schema(self):
+    def test_migration_chain_001_to_009_and_legacy_schema(self):
         versions = [r[0] for r in self.conn.execute("SELECT version FROM schema_migrations ORDER BY version")]
-        self.assertEqual(versions, [1,2,3,4,5,6,7,8])
+        self.assertEqual(versions, [1,2,3,4,5,6,7,8,9])
         self.assertEqual(MIGRATION_VERSION, 8)
         tables = {r[0] for r in self.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         self.assertTrue({"ohlcv_candles", "market_observations", "token_discovery_observations",
