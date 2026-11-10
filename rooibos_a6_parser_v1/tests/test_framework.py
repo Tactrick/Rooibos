@@ -146,6 +146,7 @@ class CollectorFrameworkTests(unittest.TestCase):
         outcome = process_a6_raw_response(
             self.framework, run_id='run1', raw_response_id='raw-empty',
             parse_context=context, request_identity_fields={'mint_address':'mint','interval':'interval'},
+            response_identity_fields={'mint_address':('identity','mint')},
             decode_payload=lambda payload: payload['records'],
             snapshot_id='a6-empty-snapshot',
             source_policies={'moby': SourcePolicy('moby', ('ohlcv',), True)},
