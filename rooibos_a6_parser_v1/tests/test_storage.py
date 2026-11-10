@@ -181,6 +181,25 @@ class A6StorageTests(unittest.TestCase):
         projected = project_a6_from_storage(c, candle_id)
         self.assertEqual({record.raw_response_id for record in projected}, {"raw1", "raw2"})
         self.assertEqual(len(projected), 2)
+
+        all_candle_ids = [row["candle_id"] for row in c.execute(
+            "SELECT candle_id FROM ohlcv_candles ORDER BY open_time_ms"
+        )]
+        records, assessments, decision, grant = publish_a6_snapshot_from_storage(
+            c, all_candle_ids, snapshot_id="a6-repeat-published",
+            source_policies={"moby": SourcePolicy("moby", ("ohlcv",), True)},
+            assessed_at="2026-11-09T10:02:00Z",
+            decided_at="2026-11-09T10:03:00Z",
+            effective_at="2026-11-09T10:04:00Z",
+            actor_id="test-governance", reason="publish repeated synthetic observations",
+        )
+        self.assertIsNotNone(grant)
+        linked_raw = {row[0] for row in c.execute(
+            "SELECT raw_response_id FROM a13_snapshot_raw_links WHERE snapshot_id=?",
+            ("a6-repeat-published",),
+        )}
+        self.assertEqual(linked_raw, {"raw1", "raw2"})
+        self.assertEqual({record.raw_response_id for record in records}, {"raw1", "raw2"})
         c.close()
 
 
