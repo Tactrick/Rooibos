@@ -102,7 +102,9 @@ class CollectorFrameworkTests(unittest.TestCase):
             request_identity_fields={'mint_address':'mint','interval':'interval'},
             response_identity_fields={'mint_address':('identity','mint')},
             decode_payload=lambda payload: [
-                dict(row, candle_status='closed') for row in payload['records']
+                dict(row, candle_status='closed', source_record_index=index,
+                     source_record_count=len(payload['records']))
+                for index, row in enumerate(payload['records'])
             ],
             snapshot_id='a6-e2e-snapshot',
             source_policies={'moby': SourcePolicy('moby', ('ohlcv',), True)},
