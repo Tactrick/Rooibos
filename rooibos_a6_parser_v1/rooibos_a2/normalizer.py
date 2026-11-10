@@ -186,6 +186,8 @@ def normalize_observation(item: MarketObservationInput) -> A2Result:
             "version": item.normalization_version, "value": numeric if numeric is not None else text,
             "status": metric.value_status, "unit": unit, "quote": metric.quote_currency,
             "window": metric.window_seconds, "kind": metric.measurement_kind,
+            # Metadata is immutable observation content, not a replay-mutable annotation.
+            "metadata": metric.metadata or {},
         }
         content = json.dumps(identity, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
         digest = hashlib.sha256(content.encode()).hexdigest()
