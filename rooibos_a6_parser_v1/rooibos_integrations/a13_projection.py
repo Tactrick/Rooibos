@@ -58,6 +58,55 @@ def project_a6(candle, *, observed_at: str):
                      payload, candle.source_record_index)
 
 
+
+def project_a6_from_storage(conn, candle_id: str):
+    """Project every persisted raw observation supporting one canonical A6 candle.
+
+    A canonical candle is deduplicated, but its evidence is not. Each immutable
+    candle/raw-response/source-record relationship becomes a separate A13
+    evidence record so snapshot membership and raw-link authorization retain
+    the complete provenance set.
+    """
+    rows = conn.execute("""
+        SELECT c.candle_id, a.chain, a.token_address AS mint_address,
+               c.market_id, c.interval, c.open_time_ms, c.open, c.high, c.low,
+               c.close, c.volume, c.candle_status, c.volume_unit,
+               c.normalization_version, l.source_id, l.endpoint_id, l.run_id,
+               l.raw_response_id, l.source_record_index, rr.retrieved_at
+        FROM ohlcv_candles c
+        JOIN assets a ON a.asset_id=c.asset_id
+        JOIN a6_candle_evidence_links l ON l.candle_id=c.candle_id
+        JOIN raw_responses rr ON rr.raw_response_id=l.raw_response_id
+        WHERE c.candle_id=?
+        ORDER BY rr.retrieved_at, l.raw_response_id, l.source_record_index
+    """, (candle_id,)).fetchall()
+    if not rows:
+        raise ValueError("A6 candle has no persisted raw-evidence links")
+
+    from rooibos_a6.parser import INTERVAL_MS
+    records = []
+    for row in rows:
+        status = "unknown" if row["candle_status"] == "unconfirmed" else row["candle_status"]
+        payload = {
+            "open_time_ms": row["open_time_ms"], "open": row["open"],
+            "high": row["high"], "low": row["low"], "close": row["close"],
+            "volume": row["volume"], "interval_ms": INTERVAL_MS.get(row["interval"]),
+            "candle_status": status, "volume_unit": row["volume_unit"],
+            "market_id": row["market_id"], "interval": row["interval"],
+        }
+        record_id = "a6:" + canonical_hash({
+            "candle_id": row["candle_id"],
+            "raw_response_id": row["raw_response_id"],
+            "source_record_index": row["source_record_index"],
+        })
+        records.append(_evidence(
+            record_id, "a6_ohlcv", row["chain"], row["mint_address"],
+            row["source_id"], row["endpoint_id"], row["run_id"],
+            row["raw_response_id"], row["retrieved_at"],
+            row["normalization_version"], payload, row["source_record_index"],
+        ))
+    return records
+
 def assess_and_store_snapshot(conn, records: Iterable[EvidenceRecord], *, snapshot_id: str,
                               source_policies: Mapping[str, SourcePolicy], assessed_at: str,
                               decided_at: str, allow_warnings: bool = False,
