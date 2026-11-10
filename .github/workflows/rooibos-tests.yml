@@ -1,0 +1,33 @@
+name: Rooibos Python verification
+
+on:
+  push:
+    branches:
+      - "fix/a13-raw-evidence-provenance"
+  pull_request:
+    paths:
+      - "rooibos_a6_parser_v1/**"
+      - ".github/workflows/rooibos-tests.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run unit and integration tests
+        working-directory: rooibos_a6_parser_v1
+        run: python -m unittest discover -s tests -v
+      - name: Compile project packages
+        working-directory: rooibos_a6_parser_v1
+        run: >-
+          python -m compileall -q
+          rooibos_collectors rooibos_a1 rooibos_a2 rooibos_a6
+          rooibos_a13 rooibos_db rooibos_integrations
