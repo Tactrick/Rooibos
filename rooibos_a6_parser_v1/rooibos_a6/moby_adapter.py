@@ -134,5 +134,9 @@ def decode_moby_parallel_ohlcv(
         else:
             status = "unconfirmed"
         row["candle_status"] = status
+        # Coordinates refer to the immutable provider arrays, not decoded
+        # output order. Repeating the count lets the pipeline detect omissions.
+        row["source_record_index"] = index
+        row["source_record_count"] = count
         output.append(row)
     return output
