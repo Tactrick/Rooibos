@@ -109,3 +109,11 @@ envelope, complete field schema, volume denomination or independent market
 identity mapping is available. No production mapping is registered or enabled,
 and no live Moby request has been made. The current profile is adapter code,
 not production source approval.
+## A6 request/response market-identity binding
+
+The A6 raw-response pipeline now requires two independent checks before decoding:
+
+- `request_identity_fields` explicitly maps the ParseContext mint and interval to the captured request parameters.
+- `response_identity_fields` explicitly maps the mint identity returned inside the immutable response payload to a nested field path. Missing or mismatched response identity is rejected before decoding, candle persistence or A13 publication.
+
+The response identity path is caller-supplied; no provider aliases or envelope paths are guessed. Synthetic tests cover matching identity, wrong-mint response and missing identity. The currently documented Moby OHLCV response description does not establish a verified returned mint-identity field or complete envelope. Therefore this new guard is proven only with synthetic fixtures; a genuine MET response fixture and explicit response identity mapping remain prerequisites for production integration. The Moby compact-array adapter must not be treated as independently proving token identity merely because the request specified a mint.
