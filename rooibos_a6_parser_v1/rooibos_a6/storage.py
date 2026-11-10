@@ -143,6 +143,16 @@ def persist_parse_result(
             if existing:
                 old = tuple(existing[k] for k in ("open","high","low","close","volume","candle_status","volume_unit"))
                 if old == values:
+                    # Preserve every raw observation that independently confirms this
+                    # canonical candle. The candle row remains deduplicated.
+                    conn.execute("""
+                        INSERT OR IGNORE INTO a6_candle_evidence_links(
+                            candle_id,raw_response_id,run_id,source_id,endpoint_id,source_record_index
+                        ) VALUES (?,?,?,?,?,?)
+                    """, (
+                        existing["candle_id"], raw_response_id, raw["run_id"], raw["source_id"],
+                        raw["endpoint_id"], candle.source_record_index,
+                    ))
                     existing_identical += 1
                 else:
                     storage_conflicts += 1
@@ -172,6 +182,14 @@ def persist_parse_result(
                 candle.source_id,candle.normalisation_version,candle.open,candle.high,candle.low,
                 candle.close,candle.volume,raw_response_id,candle.collection_run_id,"unvalidated",
                 candle.candle_status,candle.volume_unit,candle.source_record_index,candle.endpoint_id,
+            ))
+            conn.execute("""
+                INSERT OR IGNORE INTO a6_candle_evidence_links(
+                    candle_id,raw_response_id,run_id,source_id,endpoint_id,source_record_index
+                ) VALUES (?,?,?,?,?,?)
+            """, (
+                candle_id, raw_response_id, raw["run_id"], raw["source_id"],
+                raw["endpoint_id"], candle.source_record_index,
             ))
             inserted += 1
 
