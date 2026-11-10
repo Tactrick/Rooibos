@@ -29,9 +29,9 @@ class A13PipelineIntegrationTests(unittest.TestCase):
     def test_migration_chain_001_to_009_and_legacy_schema(self):
         versions = [r[0] for r in self.conn.execute("SELECT version FROM schema_migrations ORDER BY version")]
         self.assertEqual(versions, [1,2,3,4,5,6,7,8,9])
-        self.assertEqual(MIGRATION_VERSION, 8)
+        self.assertEqual(MIGRATION_VERSION, 9)
         tables = {r[0] for r in self.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        self.assertTrue({"ohlcv_candles", "market_observations", "token_discovery_observations",
+        self.assertTrue({"ohlcv_candles", "a6_candle_evidence_links", "market_observations", "token_discovery_observations",
                          "a13_record_assessments", "a13_snapshot_decisions", "a13_snapshot_lifecycle_events", "a13_retention_policies"}.issubset(tables))
         self.assertIn("snapshot_content_hash", {r[1] for r in self.conn.execute("PRAGMA table_info(a13_snapshot_decisions)")})
 
