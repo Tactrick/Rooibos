@@ -52,7 +52,7 @@ def apply_migration_005(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-def store_observation(conn: sqlite3.Connection, obs: DiscoveryObservation) -> bool:
+def store_observation(conn: sqlite3.Connection, obs: DiscoveryObservation, *, commit: bool = True) -> bool:
     """Persist only against matching captured evidence; exact replay is idempotent.
 
     Returns True for a new observation and False for an exact replay. A reused
@@ -100,7 +100,8 @@ def store_observation(conn: sqlite3.Connection, obs: DiscoveryObservation) -> bo
             if tuple(existing) != values:
                 raise ValueError("A1 observation key already exists with different content or provenance")
             conn.execute("RELEASE SAVEPOINT a1_store_observation")
-            conn.commit()
+            if commit:
+                conn.commit()
             return False
         conn.execute(
             f"""INSERT INTO token_discovery_observations ({columns})
@@ -108,9 +109,35 @@ def store_observation(conn: sqlite3.Connection, obs: DiscoveryObservation) -> bo
             values,
         )
         conn.execute("RELEASE SAVEPOINT a1_store_observation")
-        conn.commit()
+        if commit:
+            conn.commit()
         return True
     except Exception:
         conn.execute("ROLLBACK TO SAVEPOINT a1_store_observation")
         conn.execute("RELEASE SAVEPOINT a1_store_observation")
+        raise
+
+
+
+def store_observations(conn: sqlite3.Connection, observations) -> int:
+    """Persist a batch of A1 observations atomically; exact replays are idempotent."""
+    rows = list(observations)
+    if not rows:
+        raise ValueError("A1 observation batch cannot be empty")
+    keys = [item.observation_key for item in rows]
+    if len(keys) != len(set(keys)):
+        raise ValueError("A1 observation batch contains duplicate observation keys")
+    owns_transaction = not conn.in_transaction
+    conn.execute("SAVEPOINT a1_store_observations")
+    try:
+        inserted = sum(store_observation(conn, item, commit=False) for item in rows)
+        conn.execute("RELEASE SAVEPOINT a1_store_observations")
+        if owns_transaction:
+            conn.commit()
+        return inserted
+    except Exception:
+        conn.execute("ROLLBACK TO SAVEPOINT a1_store_observations")
+        conn.execute("RELEASE SAVEPOINT a1_store_observations")
+        if owns_transaction:
+            conn.rollback()
         raise
