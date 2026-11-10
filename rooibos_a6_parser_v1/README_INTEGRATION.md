@@ -95,3 +95,34 @@ The actual Alpha/Beta/Gamma runtime source and deployment topology were not supp
 
 
 A13 lifecycle and retention governance is specified in `docs/A13_SNAPSHOT_LIFECYCLE_GOVERNANCE.md`. Migration 008 adds append-only publication/supersession/withdrawal, legal-hold, retention-policy and raw-evidence linkage records. Expiry does not delete evidence.
+
+
+## Common A1/A2/A6 processing pipeline (incremental)
+
+The shared collector framework now has provider-neutral processing entry points
+for all three data families:
+
+- `process_a6_raw_response()`: reads the immutable captured response, invokes
+  an explicit provider decoder, normalises and persists A6 candles, then
+  publishes through A13.
+- `process_a2_raw_response()`: binds decoded metric inputs to captured
+  provenance, normalises and persists A2 observations, then publishes through
+  A13.
+- `process_a1_raw_response()`: verifies decoded discovery-observation
+  provenance, batch-persists A1 records atomically, then publishes through A13.
+
+A1, A2 and A6 publication now share the same A13 transaction boundary:
+assessment, decision, raw-evidence links, lifecycle registration and final
+read-gate verification. A quarantined decision remains auditable but is not
+registered or exposed to consumers. Parser/normalizer errors and provenance
+mismatches fail the run closed.
+
+Provider decoders are explicit injected functions. They only transform an
+already-captured payload into the relevant provider-neutral input model; they
+do not perform network requests. Endpoint allowlisting, request tickets and
+raw capture remain the responsibility of `CollectorFramework`.
+
+This is an implementation seam, not yet an approved production collector.
+No Moby endpoint mapping, live network adapter, credential handling, or
+production source policy is enabled. The new orchestration entry points still
+need dedicated end-to-end regression tests before acceptance.
