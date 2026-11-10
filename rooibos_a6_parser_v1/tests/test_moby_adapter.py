@@ -47,6 +47,16 @@ class MobyParallelAdapterTests(unittest.TestCase):
         rows = decode_moby_parallel_ohlcv(payload, mapping())
         self.assertGreater(rows[0]["timestamp_ms"], rows[1]["timestamp_ms"])
 
+    def test_adapter_emits_original_index_and_source_count(self):
+        payload = {"result": {
+            "time": [1800000900, 1800000000],
+            "o": [11, 10], "h": [13, 12], "l": [10, 9],
+            "c": [12, 11], "v": [200, 100],
+        }}
+        rows = decode_moby_parallel_ohlcv(payload, mapping())
+        self.assertEqual([r["source_record_index"] for r in rows], [0, 1])
+        self.assertEqual([r["source_record_count"] for r in rows], [2, 2])
+
     def test_explicit_status_mapping_is_used(self):
         payload = {"result": {
             "time": [1800000000], "o": [10], "h": [12], "l": [9],
