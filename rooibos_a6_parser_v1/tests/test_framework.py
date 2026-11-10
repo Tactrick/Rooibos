@@ -99,6 +99,7 @@ class CollectorFrameworkTests(unittest.TestCase):
         outcome = process_a6_raw_response(
             self.framework, run_id='run1', raw_response_id='raw-pipeline',
             parse_context=context,
+            request_identity_fields={'mint_address':'mint','interval':'interval'},
             decode_payload=lambda payload: [
                 dict(row, candle_status='closed') for row in payload['records']
             ],
@@ -143,7 +144,8 @@ class CollectorFrameworkTests(unittest.TestCase):
         )
         outcome = process_a6_raw_response(
             self.framework, run_id='run1', raw_response_id='raw-empty',
-            parse_context=context, decode_payload=lambda payload: payload['records'],
+            parse_context=context, request_identity_fields={'mint_address':'mint','interval':'interval'},
+            decode_payload=lambda payload: payload['records'],
             snapshot_id='a6-empty-snapshot',
             source_policies={'moby': SourcePolicy('moby', ('ohlcv',), True)},
             assessed_at='2026-11-09T10:02:00Z',
@@ -161,6 +163,54 @@ class CollectorFrameworkTests(unittest.TestCase):
         self.assertEqual(c.execute("SELECT COUNT(*) FROM a13_snapshot_decisions").fetchone()[0], 0)
         self.assertEqual(c.execute("SELECT COUNT(*) FROM ohlcv_candles").fetchone()[0], 0)
         c.close()
+
+
+    def test_a6_pipeline_rejects_context_that_does_not_match_captured_request(self):
+        for mismatch in ("mint_address", "interval"):
+            with self.subTest(mismatch=mismatch):
+                self.create_run()
+                self.framework.transition('run1', 'configured')
+                ticket = self.framework.authorise_request(
+                    'run1', {'mint':'MintABC','interval':'15m','limit':2}
+                )
+                self.framework.capture_response(
+                    ticket, raw_response_id='raw-mismatch-' + mismatch,
+                    payload={'records':[]}, http_status=200,
+                    retrieved_at='2026-11-09T10:00:01Z', page_sequence=0,
+                )
+                context = ParseContext(
+                    chain='solana', asset_id='asset1',
+                    mint_address='WrongMint' if mismatch == 'mint_address' else 'MintABC',
+                    interval='1h' if mismatch == 'interval' else '15m',
+                    source_id='moby', endpoint_id='ohlcv',
+                    collection_run_id='run1',
+                    raw_response_ref='raw-mismatch-' + mismatch,
+                )
+                with self.assertRaisesRegex(ValueError, 'does not match captured request'):
+                    process_a6_raw_response(
+                        self.framework, run_id='run1',
+                        raw_response_id='raw-mismatch-' + mismatch,
+                        parse_context=context,
+                        request_identity_fields={'mint_address':'mint','interval':'interval'},
+                        decode_payload=lambda payload: payload['records'],
+                        snapshot_id='mismatch-' + mismatch,
+                        source_policies={'moby': SourcePolicy('moby', ('ohlcv',), True)},
+                        assessed_at='2026-11-09T10:02:00Z',
+                        decided_at='2026-11-09T10:03:00Z',
+                        effective_at='2026-11-09T10:04:00Z',
+                        actor_id='test-governance', reason='verify request identity binding',
+                    )
+                c = sqlite3.connect(self.db)
+                self.assertEqual(c.execute(
+                    "SELECT COUNT(*) FROM ohlcv_candles"
+                ).fetchone()[0], 0)
+                self.assertEqual(c.execute(
+                    "SELECT status FROM collection_runs WHERE run_id='run1'"
+                ).fetchone()[0], 'raw_captured')
+                c.close()
+                # Isolate the next subtest with a fresh run identifier/database.
+                if mismatch == "mint_address":
+                    self.framework.transition('run1', 'failed')
 
     def test_unknown_endpoint_is_default_denied(self):
         framework = CollectorFramework(self.db,[])
