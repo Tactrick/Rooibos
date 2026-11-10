@@ -140,14 +140,16 @@ def _append_event(conn: sqlite3.Connection, *, event_id: str, snapshot_id: str,
 
 def register_snapshot(conn: sqlite3.Connection, *, snapshot_id: str, event_id: str,
                       effective_at: str, actor_id: str, reason: str,
-                      raw_response_ids: Iterable[str] = ()) -> None:
+                      raw_response_ids: Iterable[str] = (), commit: bool = True) -> None:
     decision = conn.execute("SELECT dataset_status FROM a13_snapshot_decisions WHERE snapshot_id=?", (snapshot_id,)).fetchone()
     if decision is None or decision[0] not in ("approved_for_research", "approved_with_warnings"):
         raise LifecycleError("only a persisted A13-approved snapshot can be registered")
     raw_ids = sorted(set(raw_response_ids))
     if not raw_ids:
         raise LifecycleError("at least one linked raw response is required to publish a snapshot")
-    conn.execute("BEGIN IMMEDIATE")
+    owns_transaction = not conn.in_transaction
+    if commit and owns_transaction:
+        conn.execute("BEGIN IMMEDIATE")
     try:
         _append_event(conn,event_id=event_id,snapshot_id=snapshot_id,event_type="registered",effective_at=effective_at,
                       actor_id=actor_id,reason=reason)
@@ -156,14 +158,18 @@ def register_snapshot(conn: sqlite3.Connection, *, snapshot_id: str, event_id: s
             if conn.execute("SELECT 1 FROM raw_responses WHERE raw_response_id=?", (raw_id,)).fetchone() is None:
                 raise LifecycleError(f"raw response {raw_id!r} does not exist")
             conn.execute("INSERT INTO a13_snapshot_raw_links VALUES (?,?,?)",(snapshot_id,raw_id,effective_at))
-        conn.commit()
+        if commit and owns_transaction:
+            conn.commit()
     except Exception:
-        conn.rollback(); raise
+        if commit and owns_transaction:
+            conn.rollback()
+        raise
 
 
 
 def register_snapshot_for_records(conn: sqlite3.Connection, *, snapshot_id: str, event_id: str,
-                                  effective_at: str, actor_id: str, reason: str, records) -> None:
+                                  effective_at: str, actor_id: str, reason: str, records,
+                                  commit: bool = True) -> None:
     decision = conn.execute(
         "SELECT dataset_type, record_ids_json, dataset_status, snapshot_content_hash "
         "FROM a13_snapshot_decisions WHERE snapshot_id=?", (snapshot_id,)
@@ -188,7 +194,8 @@ def register_snapshot_for_records(conn: sqlite3.Connection, *, snapshot_id: str,
     if None in raw_ids or "" in raw_ids:
         raise LifecycleError("every approved record must reference a raw response")
     register_snapshot(conn, snapshot_id=snapshot_id, event_id=event_id, effective_at=effective_at,
-                      actor_id=actor_id, reason=reason, raw_response_ids=raw_ids)
+                      actor_id=actor_id, reason=reason, raw_response_ids=raw_ids,
+                      commit=commit)
 
 
 def supersede_snapshot(conn: sqlite3.Connection, *, old_snapshot_id: str, new_snapshot_id: str,
