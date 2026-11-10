@@ -44,6 +44,7 @@ def process_a6_raw_response(
     raw_response_id: str,
     parse_context: ParseContext,
     request_identity_fields: Mapping[str, str],
+    response_identity_fields: Mapping[str, tuple[str, ...]],
     decode_payload: Callable[[Any], Iterable[Mapping[str, Any]]],
     snapshot_id: str,
     source_policies: Mapping[str, SourcePolicy],
@@ -59,6 +60,7 @@ def process_a6_raw_response(
 
     `request_identity_fields` explicitly maps ParseContext identity fields to
     captured request parameter names; no provider aliases are inferred.
+    `response_identity_fields` maps the independently returned response mint to an explicit nested payload path. A response without that identity is rejected; request parameters alone do not prove response attribution.
     `decode_payload` is the only provider-specific seam. It must be a pure
     transformation and return records using A6's timestamp_ms/open/high/low/
     close/volume contract. The payload is always read from immutable storage,
@@ -76,6 +78,11 @@ def process_a6_raw_response(
         not isinstance(value, str) or not value for value in request_identity_fields.values()
     ):
         raise ValueError("request_identity_fields must explicitly map mint_address and interval to captured request parameter names")
+    if set(response_identity_fields) != {"mint_address"}:
+        raise ValueError("response_identity_fields must explicitly map mint_address to a response payload path")
+    response_mint_path = response_identity_fields["mint_address"]
+    if not isinstance(response_mint_path, tuple) or not response_mint_path or any(not isinstance(part, str) or not part for part in response_mint_path):
+        raise ValueError("response mint identity path must be a non-empty tuple of field names")
     if not snapshot_id or not actor_id or not reason:
         raise ValueError("snapshot_id, actor_id and reason are required")
 
@@ -114,6 +121,13 @@ def process_a6_raw_response(
                     f"A6 ParseContext {context_field} does not match captured request parameter {request_field!r}"
                 )
         payload = json.loads(raw["payload_json"])
+        response_identity: Any = payload
+        for path_part in response_mint_path:
+            if not isinstance(response_identity, Mapping) or path_part not in response_identity:
+                raise ValueError(f"Captured A6 response is missing mapped market identity path {'.'.join(response_mint_path)!r}")
+            response_identity = response_identity[path_part]
+        if response_identity != parse_context.mint_address:
+            raise ValueError("A6 response mint identity does not match requested market ParseContext")
     finally:
         conn.close()
 
