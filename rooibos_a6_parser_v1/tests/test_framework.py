@@ -123,6 +123,45 @@ class CollectorFrameworkTests(unittest.TestCase):
         )
         c.close()
 
+
+    def test_a6_pipeline_quarantines_empty_decode_without_a13_publication(self):
+        self.create_run()
+        self.framework.transition('run1', 'configured')
+        ticket = self.framework.authorise_request(
+            'run1', {'mint':'MintABC','interval':'15m','limit':2}
+        )
+        self.framework.capture_response(
+            ticket, raw_response_id='raw-empty',
+            payload={'provider_fixture':'synthetic', 'records':[]},
+            http_status=200, retrieved_at='2026-11-09T10:00:01Z', page_sequence=0,
+        )
+        context = ParseContext(
+            chain='solana', asset_id='asset1', mint_address='MintABC',
+            interval='15m', source_id='moby', endpoint_id='ohlcv',
+            collection_run_id='run1', raw_response_ref='raw-empty',
+            volume_unit='base_token',
+        )
+        outcome = process_a6_raw_response(
+            self.framework, run_id='run1', raw_response_id='raw-empty',
+            parse_context=context, decode_payload=lambda payload: payload['records'],
+            snapshot_id='a6-empty-snapshot',
+            source_policies={'moby': SourcePolicy('moby', ('ohlcv',), True)},
+            assessed_at='2026-11-09T10:02:00Z',
+            decided_at='2026-11-09T10:03:00Z',
+            effective_at='2026-11-09T10:04:00Z',
+            actor_id='test-governance', reason='verify empty response quarantine',
+        )
+        self.assertFalse(outcome.published)
+        self.assertEqual(outcome.candle_ids, ())
+        c = sqlite3.connect(self.db)
+        self.assertEqual(
+            c.execute("SELECT status FROM collection_runs WHERE run_id='run1'").fetchone()[0],
+            'quarantined',
+        )
+        self.assertEqual(c.execute("SELECT COUNT(*) FROM a13_snapshot_decisions").fetchone()[0], 0)
+        self.assertEqual(c.execute("SELECT COUNT(*) FROM ohlcv_candles").fetchone()[0], 0)
+        c.close()
+
     def test_unknown_endpoint_is_default_denied(self):
         framework = CollectorFramework(self.db,[])
         with self.assertRaises(CollectorPolicyError):
