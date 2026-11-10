@@ -43,7 +43,7 @@ class A6StorageTests(unittest.TestCase):
         c.commit(); c.close()
         self.context = ParseContext(
             chain='solana',asset_id='asset1',mint_address='MintABC',interval='15m',source_id='moby',
-            endpoint_id='ohlcv',collection_run_id='run1',raw_response_ref=self.raw_id,
+            endpoint_id='ohlcv',collection_run_id='run1',raw_response_ref=self.raw_id, volume_unit='base_token',
         )
         self.records = [
             {"timestamp_ms": 1794225600000, "open": 1, "high": 1.2, "low": .9, "close": 1.1, "volume": 10, "candle_status":"closed"},
