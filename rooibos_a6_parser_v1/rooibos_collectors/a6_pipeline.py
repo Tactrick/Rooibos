@@ -38,7 +38,6 @@ class A6PipelineResult:
 
 
 def process_a6_raw_response(
-    db_path: str | Path,
     framework: CollectorFramework,
     *,
     run_id: str,
@@ -73,13 +72,15 @@ def process_a6_raw_response(
     if not snapshot_id or not actor_id or not reason:
         raise ValueError("snapshot_id, actor_id and reason are required")
 
+    db_path = framework.db_path
     conn = _connect(db_path)
     try:
         raw = conn.execute(
             """SELECT rr.run_id, rr.source_id, rr.endpoint_id, rr.retrieved_at,
-                      rr.payload_json, cr.status
+                      rr.payload_json, cr.status, collectors.module_code
                FROM raw_responses rr
                JOIN collection_runs cr ON cr.run_id=rr.run_id
+               JOIN collectors ON collectors.collector_id=cr.collector_id
                WHERE rr.raw_response_id=?""",
             (raw_response_id,),
         ).fetchone()
@@ -89,6 +90,8 @@ def process_a6_raw_response(
             run_id, parse_context.source_id, parse_context.endpoint_id
         ):
             raise ValueError("A6 ParseContext provenance does not match persisted raw response")
+        if raw["module_code"] != "A6":
+            raise ValueError("A6 pipeline can process only runs registered to the A6 collector module")
         if raw["status"] != "raw_captured":
             raise ValueError(f"A6 response must be processed from raw_captured state, not {raw['status']!r}")
         payload = json.loads(raw["payload_json"])
