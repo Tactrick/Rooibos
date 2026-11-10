@@ -114,11 +114,11 @@ def publish_a6_snapshot_from_storage(conn, candle_ids, *, snapshot_id: str,
                                      effective_at: str, actor_id: str, reason: str,
                                      allow_warnings: bool = False,
                                      expected_record_ids: set[str] | None = None):
-    """Assemble, assess, register and gate an A6 snapshot from persisted storage.
+    """Atomically assess, decide, link, register and verify one A6 snapshot.
 
-    No lifecycle publication occurs unless A13 persisted an approved decision.
-    The read gate then verifies exact membership, snapshot hash, lifecycle and
-    the complete set of raw-response links before returning a grant.
+    The savepoint spans the complete publication boundary. Any exception after
+    assessment (including lifecycle registration or the final read gate) rolls
+    back assessments, decision, lifecycle event and raw-evidence links together.
     """
     from rooibos_a13.lifecycle import register_snapshot_for_records
 
@@ -128,33 +128,53 @@ def publish_a6_snapshot_from_storage(conn, candle_ids, *, snapshot_id: str,
     records = []
     for candle_id in ids:
         records.extend(project_a6_from_storage(conn, candle_id))
-    assessments, decision = assess_and_store_snapshot(
-        conn, records, snapshot_id=snapshot_id, source_policies=source_policies,
-        assessed_at=assessed_at, decided_at=decided_at,
-        allow_warnings=allow_warnings, expected_record_ids=expected_record_ids,
-    )
-    if decision.dataset_status not in ("approved_for_research", "approved_with_warnings"):
-        return records, assessments, decision, None
 
-    register_snapshot_for_records(
-        conn, snapshot_id=snapshot_id, event_id=snapshot_id + ":registered",
-        effective_at=effective_at, actor_id=actor_id, reason=reason, records=records,
-    )
-    from rooibos_a13.read_gate import authorize_snapshot
-    grant = authorize_snapshot(
-        conn, snapshot_id=snapshot_id, records=records,
-        expected_snapshot_hash=snapshot_content_hash(records),
-        expected_assessments_hash=decision.assessments_hash,
-        allowed_policy_versions={decision.policy_version},
-        allow_warnings=allow_warnings, now=effective_at,
-    )
-    return records, assessments, decision, grant
+    owns_transaction = not conn.in_transaction
+    conn.execute("SAVEPOINT a13_publish_a6_snapshot")
+    try:
+        assessments, decision = assess_and_store_snapshot(
+            conn, records, snapshot_id=snapshot_id, source_policies=source_policies,
+            assessed_at=assessed_at, decided_at=decided_at,
+            allow_warnings=allow_warnings, expected_record_ids=expected_record_ids,
+            commit=False,
+        )
+        if decision.dataset_status not in ("approved_for_research", "approved_with_warnings"):
+            conn.execute("ROLLBACK TO SAVEPOINT a13_publish_a6_snapshot")
+            conn.execute("RELEASE SAVEPOINT a13_publish_a6_snapshot")
+            if owns_transaction:
+                conn.commit()
+            return records, assessments, decision, None
+
+        register_snapshot_for_records(
+            conn, snapshot_id=snapshot_id, event_id=snapshot_id + ":registered",
+            effective_at=effective_at, actor_id=actor_id, reason=reason,
+            records=records, commit=False,
+        )
+        from rooibos_a13.read_gate import authorize_snapshot
+        grant = authorize_snapshot(
+            conn, snapshot_id=snapshot_id, records=records,
+            expected_snapshot_hash=snapshot_content_hash(records),
+            expected_assessments_hash=decision.assessments_hash,
+            allowed_policy_versions={decision.policy_version},
+            allow_warnings=allow_warnings, now=effective_at,
+        )
+        conn.execute("RELEASE SAVEPOINT a13_publish_a6_snapshot")
+        if owns_transaction:
+            conn.commit()
+        return records, assessments, decision, grant
+    except Exception:
+        conn.execute("ROLLBACK TO SAVEPOINT a13_publish_a6_snapshot")
+        conn.execute("RELEASE SAVEPOINT a13_publish_a6_snapshot")
+        if owns_transaction:
+            conn.rollback()
+        raise
 
 def assess_and_store_snapshot(conn, records: Iterable[EvidenceRecord], *, snapshot_id: str,
                               source_policies: Mapping[str, SourcePolicy], assessed_at: str,
                               decided_at: str, allow_warnings: bool = False,
                               conflict_record_ids: set[str] | None = None,
-                              expected_record_ids: set[str] | None = None):
+                              expected_record_ids: set[str] | None = None,
+                              commit: bool = True):
     rows = list(records)
     if not rows:
         raise ValueError("snapshot cannot be empty")
@@ -178,7 +198,8 @@ def assess_and_store_snapshot(conn, records: Iterable[EvidenceRecord], *, snapsh
             store_assessment(conn, a, "assessment:" + ah[:32], ah, commit=False)
         store_decision(conn, decision, commit=False)
         conn.execute("RELEASE SAVEPOINT a13_assess_store_snapshot")
-        conn.commit()
+        if commit:
+            conn.commit()
     except Exception:
         conn.execute("ROLLBACK TO SAVEPOINT a13_assess_store_snapshot")
         conn.execute("RELEASE SAVEPOINT a13_assess_store_snapshot")
