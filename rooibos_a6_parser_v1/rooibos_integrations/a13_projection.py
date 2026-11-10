@@ -1,6 +1,7 @@
 """Provider-neutral projections from A1/A2/A6 canonical records into A13 evidence."""
 from __future__ import annotations
 from dataclasses import asdict
+import json
 from typing import Iterable, Mapping
 from rooibos_a13.models import EvidenceRecord, SourcePolicy, canonical_hash
 from rooibos_a13.validator import assess_record
@@ -29,7 +30,8 @@ def project_a2(metric):
     payload = {"metric": metric.metric_code, "value": value, "unit": metric.unit,
                "measurement_kind": metric.measurement_kind, "market_scope": metric.market_scope,
                "market_id": metric.market_id, "value_status": metric.value_status,
-               "quote_currency": metric.quote_currency, "window_seconds": metric.window_seconds}
+               "quote_currency": metric.quote_currency, "window_seconds": metric.window_seconds,
+               "metadata": json.loads(metric.metadata_json)}
     return _evidence("a2:" + metric.observation_id, "a2_market", metric.chain,
                      metric.mint_address, metric.source_id, metric.endpoint_id, metric.run_id,
                      metric.raw_response_id, metric.observed_at, metric.normalization_version,
@@ -108,6 +110,104 @@ def project_a6_from_storage(conn, candle_id: str):
     return records
 
 
+
+def publish_evidence_snapshot(conn, records, *, snapshot_id: str,
+                              source_policies: Mapping[str, SourcePolicy],
+                              assessed_at: str, decided_at: str, effective_at: str,
+                              actor_id: str, reason: str, allow_warnings: bool = False,
+                              expected_record_ids: set[str] | None = None):
+    """Shared atomic A13 publication boundary for A1, A2 and A6 projections."""
+    from rooibos_a13.lifecycle import register_snapshot_for_records
+
+    rows = list(records)
+    if not rows or len({r.record_id for r in rows}) != len(rows):
+        raise ValueError("A13 publication requires non-empty unique evidence records")
+    owns_transaction = not conn.in_transaction
+    conn.execute("SAVEPOINT a13_publish_evidence_snapshot")
+    try:
+        assessments, decision = assess_and_store_snapshot(
+            conn, rows, snapshot_id=snapshot_id, source_policies=source_policies,
+            assessed_at=assessed_at, decided_at=decided_at,
+            allow_warnings=allow_warnings, expected_record_ids=expected_record_ids,
+            commit=False,
+        )
+        if decision.dataset_status not in ("approved_for_research", "approved_with_warnings"):
+            conn.execute("RELEASE SAVEPOINT a13_publish_evidence_snapshot")
+            if owns_transaction:
+                conn.commit()
+            return rows, assessments, decision, None
+
+        register_snapshot_for_records(
+            conn, snapshot_id=snapshot_id, event_id=snapshot_id + ":registered",
+            effective_at=effective_at, actor_id=actor_id, reason=reason,
+            records=rows, commit=False,
+        )
+        from rooibos_a13.read_gate import authorize_snapshot
+        grant = authorize_snapshot(
+            conn, snapshot_id=snapshot_id, records=rows,
+            expected_snapshot_hash=snapshot_content_hash(rows),
+            expected_assessments_hash=decision.assessments_hash,
+            allowed_policy_versions={decision.policy_version},
+            allow_warnings=allow_warnings, now=effective_at,
+        )
+        conn.execute("RELEASE SAVEPOINT a13_publish_evidence_snapshot")
+        if owns_transaction:
+            conn.commit()
+        return rows, assessments, decision, grant
+    except Exception:
+        conn.execute("ROLLBACK TO SAVEPOINT a13_publish_evidence_snapshot")
+        conn.execute("RELEASE SAVEPOINT a13_publish_evidence_snapshot")
+        if owns_transaction:
+            conn.rollback()
+        raise
+
+
+def project_a2_from_storage(conn, observation_ids):
+    """Rebuild exact A2 evidence records from immutable persisted observations."""
+    from rooibos_a2.normalizer import NormalizedMetric
+
+    ids = list(observation_ids)
+    if not ids or len(ids) != len(set(ids)):
+        raise ValueError("A2 snapshot requires a non-empty unique observation ID set")
+    placeholders = ",".join("?" for _ in ids)
+    sql = "SELECT * FROM market_observations WHERE observation_id IN (" + placeholders + ")"
+    rows = conn.execute(sql, ids).fetchall()
+    by_id = {row["observation_id"]: row for row in rows}
+    if set(by_id) != set(ids):
+        raise ValueError("A2 snapshot membership does not match persisted observations")
+
+    projected = []
+    for observation_id in ids:
+        row = by_id[observation_id]
+        metric = NormalizedMetric(
+            row["observation_id"], row["chain"], row["mint_address"], row["market_id"],
+            row["pool_address"], row["market_scope"], row["metric_code"],
+            row["numeric_value"], row["text_value"], row["value_status"], row["unit"],
+            row["quote_currency"], row["window_seconds"], row["measurement_kind"],
+            row["observed_at"], row["source_id"], row["endpoint_id"], row["run_id"],
+            row["raw_response_id"], row["source_record_index"], row["normalization_version"],
+            row["metadata_json"], row["content_sha256"],
+        )
+        projected.append(project_a2(metric))
+    return projected
+
+
+def publish_a2_snapshot_from_storage(conn, observation_ids, *, snapshot_id: str,
+                                     source_policies: Mapping[str, SourcePolicy],
+                                     assessed_at: str, decided_at: str, effective_at: str,
+                                     actor_id: str, reason: str,
+                                     allow_warnings: bool = False,
+                                     expected_record_ids: set[str] | None = None):
+    """Publish persisted A2 observations through the shared A13 read boundary."""
+    records = project_a2_from_storage(conn, observation_ids)
+    return publish_evidence_snapshot(
+        conn, records, snapshot_id=snapshot_id, source_policies=source_policies,
+        assessed_at=assessed_at, decided_at=decided_at, effective_at=effective_at,
+        actor_id=actor_id, reason=reason, allow_warnings=allow_warnings,
+        expected_record_ids=expected_record_ids,
+    )
+
+
 def publish_a6_snapshot_from_storage(conn, candle_ids, *, snapshot_id: str,
                                      source_policies: Mapping[str, SourcePolicy],
                                      assessed_at: str, decided_at: str,
@@ -120,55 +220,19 @@ def publish_a6_snapshot_from_storage(conn, candle_ids, *, snapshot_id: str,
     assessment (including lifecycle registration or the final read gate) rolls
     back assessments, decision, lifecycle event and raw-evidence links together.
     """
-    from rooibos_a13.lifecycle import register_snapshot_for_records
-
     ids = list(candle_ids)
     if not ids or len(ids) != len(set(ids)):
         raise ValueError("A6 snapshot requires a non-empty unique candle ID set")
     records = []
     for candle_id in ids:
         records.extend(project_a6_from_storage(conn, candle_id))
+    return publish_evidence_snapshot(
+        conn, records, snapshot_id=snapshot_id, source_policies=source_policies,
+        assessed_at=assessed_at, decided_at=decided_at, effective_at=effective_at,
+        actor_id=actor_id, reason=reason, allow_warnings=allow_warnings,
+        expected_record_ids=expected_record_ids,
+    )
 
-    owns_transaction = not conn.in_transaction
-    conn.execute("SAVEPOINT a13_publish_a6_snapshot")
-    try:
-        assessments, decision = assess_and_store_snapshot(
-            conn, records, snapshot_id=snapshot_id, source_policies=source_policies,
-            assessed_at=assessed_at, decided_at=decided_at,
-            allow_warnings=allow_warnings, expected_record_ids=expected_record_ids,
-            commit=False,
-        )
-        if decision.dataset_status not in ("approved_for_research", "approved_with_warnings"):
-            # Persist the quarantine decision and its assessments as an auditable
-            # outcome, but publish no lifecycle event or raw-evidence links.
-            conn.execute("RELEASE SAVEPOINT a13_publish_a6_snapshot")
-            if owns_transaction:
-                conn.commit()
-            return records, assessments, decision, None
-
-        register_snapshot_for_records(
-            conn, snapshot_id=snapshot_id, event_id=snapshot_id + ":registered",
-            effective_at=effective_at, actor_id=actor_id, reason=reason,
-            records=records, commit=False,
-        )
-        from rooibos_a13.read_gate import authorize_snapshot
-        grant = authorize_snapshot(
-            conn, snapshot_id=snapshot_id, records=records,
-            expected_snapshot_hash=snapshot_content_hash(records),
-            expected_assessments_hash=decision.assessments_hash,
-            allowed_policy_versions={decision.policy_version},
-            allow_warnings=allow_warnings, now=effective_at,
-        )
-        conn.execute("RELEASE SAVEPOINT a13_publish_a6_snapshot")
-        if owns_transaction:
-            conn.commit()
-        return records, assessments, decision, grant
-    except Exception:
-        conn.execute("ROLLBACK TO SAVEPOINT a13_publish_a6_snapshot")
-        conn.execute("RELEASE SAVEPOINT a13_publish_a6_snapshot")
-        if owns_transaction:
-            conn.rollback()
-        raise
 
 def assess_and_store_snapshot(conn, records: Iterable[EvidenceRecord], *, snapshot_id: str,
                               source_policies: Mapping[str, SourcePolicy], assessed_at: str,
