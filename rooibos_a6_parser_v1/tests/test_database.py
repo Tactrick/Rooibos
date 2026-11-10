@@ -24,7 +24,7 @@ class Migration001Tests(unittest.TestCase):
         conn = _connect(self.db)
         try:
             version = conn.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
-            self.assertEqual(version, 8)
+            self.assertEqual(version, 9)
             indexes = {r[0] for r in conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='index'"
             )}
@@ -126,7 +126,7 @@ class Migration001Tests(unittest.TestCase):
                 THIS IS NOT VALID SQL;
             """
             with self.assertRaises(sqlite3.OperationalError):
-                apply_migrations(conn, [(9, "Injected failure test", broken_sql)])
+                apply_migrations(conn, [(10, "Injected failure test", broken_sql)])
             self.assertIsNone(conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='should_rollback'"
             ).fetchone())
