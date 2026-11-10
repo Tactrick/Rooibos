@@ -13,6 +13,7 @@ sys.path.insert(0, str(DB_ROOT))
 from rooibos_db.database import initialize_database, check_integrity
 from rooibos_a6.parser import ParseContext, normalise_records
 from rooibos_a6.storage import store_raw_response, persist_parse_result
+from rooibos_integrations.a13_projection import project_a6_from_storage
 
 
 class A6StorageTests(unittest.TestCase):
@@ -133,6 +134,53 @@ class A6StorageTests(unittest.TestCase):
         persist_parse_result(self.db, result=self.parse(), raw_response_id=self.raw_id)
         self.assertTrue(check_integrity(self.db)['ok'])
 
+
+
+    def test_repeated_identical_candle_retains_all_raw_evidence_for_a13(self):
+        first = persist_parse_result(self.db, result=self.parse(), raw_response_id=self.raw_id)
+        self.assertEqual(first["inserted_count"], 2)
+
+        c = sqlite3.connect(self.db)
+        c.execute("""INSERT INTO collection_runs(
+            run_id,collector_id,source_id,endpoint_id,collector_version,requested_scope_json,started_at,status
+        ) VALUES ('run2','A6','moby','ohlcv','1.0.0','{}','2026-11-09T10:01:00Z','collecting')""")
+        c.commit()
+        c.close()
+
+        second_raw_id = "raw2"
+        store_raw_response(
+            self.db, raw_response_id=second_raw_id, run_id="run2", source_id="moby",
+            endpoint_id="ohlcv", payload={"synthetic_fixture": True, "candles": 2},
+            request_params={"mint":"MintABC","interval":"15m","limit":2},
+            retrieved_at="2026-11-09T10:01:01Z", http_status=200,
+        )
+        c = sqlite3.connect(self.db)
+        c.execute("UPDATE collection_runs SET status='parsed' WHERE run_id='run2'")
+        c.commit()
+        c.close()
+
+        context2 = ParseContext(
+            chain="solana", asset_id="asset1", mint_address="MintABC", interval="15m",
+            source_id="moby", endpoint_id="ohlcv", collection_run_id="run2",
+            raw_response_ref=second_raw_id,
+        )
+        result2 = normalise_records(self.records, context2)
+        second = persist_parse_result(self.db, result=result2, raw_response_id=second_raw_id)
+        self.assertEqual(second["inserted_count"], 0)
+        self.assertEqual(second["existing_identical_count"], 2)
+
+        c = sqlite3.connect(self.db)
+        c.row_factory = sqlite3.Row
+        candle_id = c.execute("SELECT candle_id FROM ohlcv_candles ORDER BY open_time_ms LIMIT 1").fetchone()["candle_id"]
+        evidence = c.execute(
+            "SELECT raw_response_id,run_id,source_record_index FROM a6_candle_evidence_links WHERE candle_id=? ORDER BY raw_response_id",
+            (candle_id,),
+        ).fetchall()
+        self.assertEqual({row["raw_response_id"] for row in evidence}, {"raw1", "raw2"})
+        projected = project_a6_from_storage(c, candle_id)
+        self.assertEqual({record.raw_response_id for record in projected}, {"raw1", "raw2"})
+        self.assertEqual(len(projected), 2)
+        c.close()
 
 if __name__ == '__main__':
     unittest.main()
