@@ -66,3 +66,24 @@ Latest local test run: **61 tests passed**.
 - No paper positions, trading actions or wallet operations.
 
 A2 provider-neutral implementation is now included. Next pipeline work: A1 Token Discovery integration, followed by A13 independent validation and acceptance testing. A2 source-specific live acceptance and A6 live acceptance remain blocked on genuine provider fixtures and restricted adapter validation.
+
+
+## MET parallel-array adapter scaffold
+
+`rooibos_a6/moby_adapter.py` now provides an explicit-schema adapter for
+Moby's confirmed newest-first parallel-array response shape. The adapter
+requires the caller to supply the exact envelope path, array field names,
+timestamp unit and volume unit. It preserves provider array order so A6's
+`source_record_index` continues to refer to the original response position;
+the A6 normalizer independently orders canonical candles chronologically.
+
+Candle closure semantics are not inferred. Without an explicitly reviewed
+status field and value mapping, every candle is marked `unconfirmed`. Unknown
+status values also remain `unconfirmed`. Unequal array lengths, missing
+configured fields, missing envelopes and ambiguous timestamp units are rejected.
+
+This is adapter infrastructure only. No genuine MET response fixture has yet
+verified the envelope, concrete array names, timestamp unit, volume semantics,
+market identity or closure mapping. Therefore no MET mapping is instantiated,
+no Moby endpoint is enabled, and the initial target of 100 closed 15-minute
+candles cannot yet be claimed as achieved.
