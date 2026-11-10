@@ -99,6 +99,20 @@ def authorize_snapshot(conn: sqlite3.Connection, *, snapshot_id: str,
             raise SnapshotAccessDenied(f"snapshot lifecycle unavailable or invalid: {exc}") from exc
         if state.state != "registered":
             raise SnapshotAccessDenied(f"snapshot lifecycle state is {state.state}, not registered")
+        # Lifecycle registration is only valid when its immutable raw links
+        # exactly represent the raw evidence referenced by the approved records.
+        try:
+            linked_raw_ids = {
+                item[0] for item in conn.execute(
+                    "SELECT raw_response_id FROM a13_snapshot_raw_links WHERE snapshot_id=?",
+                    (snapshot_id,)
+                ).fetchall()
+            }
+        except sqlite3.Error as exc:
+            raise SnapshotAccessDenied(f"snapshot raw-evidence links unavailable: {exc}") from exc
+        expected_raw_ids = {record.raw_response_id for record in rows}
+        if None in expected_raw_ids or "" in expected_raw_ids or linked_raw_ids != expected_raw_ids:
+            raise SnapshotAccessDenied("persisted raw-evidence links differ from approved snapshot records")
         if enforce_retention:
             try:
                 retention = assess_retention(conn, snapshot_id=snapshot_id, now=now or "")
