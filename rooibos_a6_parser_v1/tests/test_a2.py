@@ -59,6 +59,11 @@ class A2Tests(unittest.TestCase):
         self.assertEqual(a.observations[0].observation_id,b.observations[0].observation_id)
         self.assertEqual(a.manifest()['manifest_sha256'],b.manifest()['manifest_sha256'])
 
+    def test_metric_metadata_is_part_of_observation_identity(self):
+        a=normalize_observation(self.item(metrics=[MarketMetricInput('liquidity',100,unit='USD',metadata={'provider_field':'liqA'})])).observations[0]
+        b=normalize_observation(self.item(metrics=[MarketMetricInput('liquidity',100,unit='USD',metadata={'provider_field':'liqB'})])).observations[0]
+        self.assertNotEqual(a.observation_id,b.observation_id)
+        self.assertNotEqual(a.content_sha256,b.content_sha256)
     def test_cross_source_like_for_like_comparison(self):
         a=normalize_observation(self.item()).observations[0]
         b=normalize_observation(self.item(source='src2',endpoint='ep2',run='r2',raw='raw2',metrics=[MarketMetricInput('liquidity',104000,unit='USD')])).observations[0]
