@@ -86,6 +86,33 @@ class A13PipelineIntegrationTests(unittest.TestCase):
                 expected_assessments_hash=decision.assessments_hash,
                 allowed_policy_versions={decision.policy_version}, now="2026-11-09T10:03:00Z")
 
+    def test_a13_warnings_are_quarantined_unless_explicitly_allowed(self):
+        ctx = DiscoveryContext("solana", MINT, "fixture_source", "fixture_endpoint",
+            "run-warning", "raw-warning", 0, "2026-11-09T10:00:00Z")
+        record = project_a1(normalize_a1(ctx, {}, field_map={}))
+        assessments, denied = assess_and_store_snapshot(self.conn, [record],
+            snapshot_id="snap-warning-default", source_policies=POLICIES,
+            assessed_at="2026-11-09T10:01:00Z", decided_at="2026-11-09T10:02:00Z")
+        self.assertEqual(assessments[0].status, "valid_with_warnings")
+        self.assertEqual(denied.dataset_status, "quarantined")
+        _, allowed = assess_and_store_snapshot(self.conn, [record],
+            snapshot_id="snap-warning-allowed", source_policies=POLICIES,
+            assessed_at="2026-11-09T10:01:00Z", decided_at="2026-11-09T10:02:00Z",
+            allow_warnings=True)
+        self.assertEqual(allowed.dataset_status, "approved_with_warnings")
+
+    def test_a13_incomplete_expected_membership_is_quarantined(self):
+        ctx = DiscoveryContext("solana", MINT, "fixture_source", "fixture_endpoint",
+            "run-incomplete", "raw-incomplete", 0, "2026-11-09T10:00:00Z")
+        record = project_a1(normalize_a1(ctx, {"symbol":"SOL"},
+            field_map={"symbol":"symbol"}))
+        _, decision = assess_and_store_snapshot(self.conn, [record],
+            snapshot_id="snap-incomplete", source_policies=POLICIES,
+            assessed_at="2026-11-09T10:01:00Z", decided_at="2026-11-09T10:02:00Z",
+            expected_record_ids={record.record_id, "expected-but-missing"})
+        self.assertEqual(decision.dataset_status, "quarantined")
+        self.assertIn("snapshot_incomplete", {finding.code for finding in decision.findings})
+
     def test_a13_assessments_and_decision_roll_back_as_one_unit(self):
         ctx = DiscoveryContext("solana", MINT, "fixture_source", "fixture_endpoint",
             "run-atomic", "raw-atomic", 7, "2026-11-09T10:00:00Z")
