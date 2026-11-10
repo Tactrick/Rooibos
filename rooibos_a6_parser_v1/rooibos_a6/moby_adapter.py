@@ -77,7 +77,8 @@ def _timestamp_ms(value: Any, unit: str) -> int:
 
 
 def decode_moby_parallel_ohlcv(
-    payload: Any, mapping: MobyParallelOHLCVMapping,
+    payload: Any, mapping: MobyParallelOHLCVMapping, *,
+    include_in_progress_candle: bool | None = None,
 ) -> list[dict[str, Any]]:
     """Decode mapped parallel arrays without guessing names or semantic units.
 
@@ -124,10 +125,14 @@ def decode_moby_parallel_ohlcv(
             name: values[index] for name, values in arrays.items()
         }
         row["timestamp_ms"] = _timestamp_ms(row["timestamp_ms"], mapping.timestamp_unit)
-        row["candle_status"] = (
-            mapping.status_values.get(str(statuses[index]), "unconfirmed")
-            if statuses is not None and mapping.status_values is not None
-            else "unconfirmed"
-        )
+        if statuses is not None and mapping.status_values is not None:
+            status = mapping.status_values.get(str(statuses[index]), "unconfirmed")
+        elif include_in_progress_candle is False:
+            status = "closed"
+        elif include_in_progress_candle is True:
+            status = "forming" if index == 0 else "closed"
+        else:
+            status = "unconfirmed"
+        row["candle_status"] = status
         output.append(row)
     return output
