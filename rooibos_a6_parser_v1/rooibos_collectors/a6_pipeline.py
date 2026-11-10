@@ -43,6 +43,7 @@ def process_a6_raw_response(
     run_id: str,
     raw_response_id: str,
     parse_context: ParseContext,
+    request_identity_fields: Mapping[str, str],
     decode_payload: Callable[[Any], Iterable[Mapping[str, Any]]],
     snapshot_id: str,
     source_policies: Mapping[str, SourcePolicy],
@@ -56,6 +57,8 @@ def process_a6_raw_response(
 ) -> A6PipelineResult:
     """Process one immutable captured response through parse, storage and A13.
 
+    `request_identity_fields` explicitly maps ParseContext identity fields to
+    captured request parameter names; no provider aliases are inferred.
     `decode_payload` is the only provider-specific seam. It must be a pure
     transformation and return records using A6's timestamp_ms/open/high/low/
     close/volume contract. The payload is always read from immutable storage,
@@ -69,6 +72,10 @@ def process_a6_raw_response(
         raise ValueError("A6 ParseContext run ID does not match requested run")
     if parse_context.raw_response_ref != raw_response_id:
         raise ValueError("A6 ParseContext raw-response ID does not match requested evidence")
+    if set(request_identity_fields) != {"mint_address", "interval"} or any(
+        not isinstance(value, str) or not value for value in request_identity_fields.values()
+    ):
+        raise ValueError("request_identity_fields must explicitly map mint_address and interval to captured request parameter names")
     if not snapshot_id or not actor_id or not reason:
         raise ValueError("snapshot_id, actor_id and reason are required")
 
@@ -76,9 +83,11 @@ def process_a6_raw_response(
     conn = _connect(db_path)
     try:
         raw = conn.execute(
-            """SELECT rr.run_id, rr.source_id, rr.endpoint_id, rr.retrieved_at,
-                      rr.payload_json, cr.status, collectors.module_code
+            """SELECT rr.run_id, rr.source_id, rr.endpoint_id, rr.request_id,
+                      rr.retrieved_at, rr.payload_json, cr.status, collectors.module_code,
+                      req.request_params_json
                FROM raw_responses rr
+               JOIN collection_requests req ON req.request_id=rr.request_id
                JOIN collection_runs cr ON cr.run_id=rr.run_id
                JOIN collectors ON collectors.collector_id=cr.collector_id
                WHERE rr.raw_response_id=?""",
@@ -94,6 +103,16 @@ def process_a6_raw_response(
             raise ValueError("A6 pipeline can process only runs registered to the A6 collector module")
         if raw["status"] != "raw_captured":
             raise ValueError(f"A6 response must be processed from raw_captured state, not {raw['status']!r}")
+        request_params = json.loads(raw["request_params_json"])
+        for context_field, request_field in request_identity_fields.items():
+            if request_field not in request_params:
+                raise ValueError(
+                    f"Captured A6 request is missing mapped identity parameter {request_field!r}"
+                )
+            if request_params[request_field] != getattr(parse_context, context_field):
+                raise ValueError(
+                    f"A6 ParseContext {context_field} does not match captured request parameter {request_field!r}"
+                )
         payload = json.loads(raw["payload_json"])
     finally:
         conn.close()
