@@ -87,3 +87,25 @@ verified the envelope, concrete array names, timestamp unit, volume semantics,
 market identity or closure mapping. Therefore no MET mapping is instantiated,
 no Moby endpoint is enabled, and the initial target of 100 closed 15-minute
 candles cannot yet be claimed as achieved.
+
+## Moby get_token_ohlcv mapping status
+
+A source-specific profile now maps the compact `t/o/h/l/c/v` column names and
+millisecond timestamps. Public Moby tool descriptions corroborate that `t` is
+Unix milliseconds, prices are USD, the series is newest-first, and the
+in-progress candle is excluded by default (or appears at index zero when
+requested). The complete output schema is not published in the accessible
+first-party reference; compact OHLCV column names beyond `t`/`c` are therefore
+treated as a provisional mapping pending a genuine captured response.
+
+The decoder receives the captured `include_in_progress_candle` request value.
+It marks all rows unconfirmed if that request evidence is absent; if true, only
+row zero is forming; if false, returned rows are closed per the documented
+tool contract. The mapping requires an explicitly verified volume unit; USD
+price denomination alone is not treated as proof of volume denomination.
+
+**Still blocked:** no genuine Moby MET response fixture, verified response
+envelope, complete field schema, volume denomination or independent market
+identity mapping is available. No production mapping is registered or enabled,
+and no live Moby request has been made. The current profile is adapter code,
+not production source approval.
