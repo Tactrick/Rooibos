@@ -33,7 +33,7 @@ class Migration001Tests(unittest.TestCase):
                 "SELECT name FROM sqlite_master WHERE type='table'"
             )}
             for required in ("sources", "collectors", "collection_runs", "raw_responses",
-                             "ohlcv_candles", "validation_runs", "research_snapshots", "market_observations", "market_observation_comparisons"):
+                             "ohlcv_candles", "a6_candle_evidence_links", "validation_runs", "research_snapshots", "market_observations", "market_observation_comparisons"):
                 self.assertIn(required, tables)
         finally:
             conn.close()
@@ -45,7 +45,7 @@ class Migration001Tests(unittest.TestCase):
         try:
             self.assertEqual(conn.execute(
                 "SELECT COUNT(*) FROM schema_migrations"
-            ).fetchone()[0], 8)
+            ).fetchone()[0], 9)
         finally:
             conn.close()
 
@@ -131,7 +131,7 @@ class Migration001Tests(unittest.TestCase):
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='should_rollback'"
             ).fetchone())
             self.assertIsNone(conn.execute(
-                "SELECT version FROM schema_migrations WHERE version=9"
+                "SELECT version FROM schema_migrations WHERE version=10"
             ).fetchone())
         finally:
             conn.close()
