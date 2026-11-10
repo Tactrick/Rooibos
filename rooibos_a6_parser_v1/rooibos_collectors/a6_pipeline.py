@@ -136,6 +136,23 @@ def process_a6_raw_response(
         if any(not isinstance(item, Mapping) for item in records):
             raise TypeError("A6 provider decoder must return mapping records")
 
+        # Publication requires exact coordinates into the captured response.
+        # Re-enumerating decoded rows would shift provenance after filtering
+        # or reordering, so require a complete, one-to-one source index set.
+        if records:
+            indices = [item.get("source_record_index") for item in records]
+            counts = [item.get("source_record_count") for item in records]
+            if any(isinstance(i, bool) or not isinstance(i, int) or i < 0 for i in indices):
+                raise ValueError("A6 decoded records must carry non-negative original source_record_index values")
+            if any(isinstance(c, bool) or not isinstance(c, int) or c < 0 for c in counts):
+                raise ValueError("A6 decoded records must carry the original source_record_count")
+            if len(set(indices)) != len(indices):
+                raise ValueError("A6 decoded records contain duplicate original source_record_index values")
+            if len(set(counts)) != 1:
+                raise ValueError("A6 decoded records disagree on original source_record_count")
+            source_count = counts[0]
+            if len(records) != source_count or set(indices) != set(range(source_count)):
+                raise ValueError("A6 decoder omitted or altered original response records; source provenance is incomplete")
         framework.transition(run_id, "parsed")
         parsed = normalise_records(records, parse_context)
         stored = persist_parse_result(
