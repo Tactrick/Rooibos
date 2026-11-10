@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Iterable
 
 DB_FILENAME = "moby_market.db"
-MIGRATION_VERSION = 8
+MIGRATION_VERSION = 9
 
 MIGRATION_001_SQL = r"""
 CREATE TABLE schema_registry (
@@ -398,6 +398,7 @@ ALTER TABLE a13_snapshot_decisions ADD COLUMN snapshot_content_hash TEXT NOT NUL
 """
 
 MIGRATION_008_SQL = Path(__file__).resolve().parents[1].joinpath("migrations", "008_a13_snapshot_lifecycle.sql").read_text(encoding="utf-8")
+MIGRATION_009_SQL = Path(__file__).resolve().parents[1].joinpath("migrations", "009_a6_candle_evidence_links.sql").read_text(encoding="utf-8")
 
 
 def _connect(path: str | Path) -> sqlite3.Connection:
@@ -436,6 +437,7 @@ def apply_migrations(conn: sqlite3.Connection, migrations: Iterable[tuple[int, s
             (6, "Add append-only A13 quality assessments and snapshot decisions", MIGRATION_006_SQL),
             (7, "Bind A13 decisions to exact snapshot content hashes", MIGRATION_007_SQL),
             (8, "Add append-only A13 snapshot lifecycle and retention governance", MIGRATION_008_SQL),
+            (9, "Add append-only A6 candle-to-raw-evidence links", MIGRATION_009_SQL),
         ]
 
     conn.execute("""
