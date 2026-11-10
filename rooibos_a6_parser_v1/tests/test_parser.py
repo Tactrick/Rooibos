@@ -71,6 +71,24 @@ class ParserTests(unittest.TestCase):
         self.assertEqual([c.open_time_ms for c in result.candles], [BASE, BASE + 900_000])
         self.assertEqual([c.source_record_index for c in result.candles], [1, 0])
 
+    def test_explicit_source_indices_survive_rejection_and_reordering(self):
+        records = [
+            row(BASE + 900_000, source_record_index=2),
+            row(BASE + 1, source_record_index=1),  # rejected, but index is not renumbered
+            row(BASE, source_record_index=0),
+        ]
+        result = normalise_records(records, context())
+        self.assertEqual([c.source_record_index for c in result.candles], [0, 2])
+        self.assertEqual(result.findings[0].source_record_index, 1)
+        self.assertEqual(result.rejected_count, 1)
+
+    def test_duplicate_explicit_source_indices_fail_closed(self):
+        with self.assertRaises(ParserError):
+            normalise_records([
+                row(source_record_index=4),
+                row(BASE + 900_000, source_record_index=4),
+            ], context())
+
     def test_exact_duplicate_collapses_and_is_reported(self):
         result = normalise_records([row(), row()], context())
         self.assertEqual(len(result.candles), 1)
