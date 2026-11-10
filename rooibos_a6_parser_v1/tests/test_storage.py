@@ -254,8 +254,12 @@ class A6StorageTests(unittest.TestCase):
                     actor_id="test-governance", reason="exercise atomic rollback",
                 )
 
+        # Assessments are keyed by record, not snapshot; compare their
+        # global count as this isolated fixture has no prior A13 assessments.
+        self.assertEqual(c.execute(
+            "SELECT COUNT(*) FROM a13_record_assessments"
+        ).fetchone()[0], 0, "assessment rows survived failed publication")
         for table in (
-            "a13_record_assessments",
             "a13_snapshot_decisions",
             "a13_snapshot_lifecycle_events",
             "a13_snapshot_raw_links",
