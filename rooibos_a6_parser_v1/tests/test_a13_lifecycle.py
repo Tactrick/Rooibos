@@ -20,6 +20,7 @@ class A13LifecycleTests(unittest.TestCase):
         self.conn.execute("INSERT INTO collectors(collector_id,collector_name,module_code,version) VALUES ('collector','Fixture','A1','1')")
         self.conn.execute("INSERT INTO collection_runs(run_id,collector_id,source_id,collector_version,requested_scope_json,started_at,status) VALUES ('run','collector','fixture','1','{}','2026-11-09T09:00:00Z','completed')")
         self.conn.execute("INSERT INTO raw_responses(raw_response_id,run_id,source_id,retrieved_at,request_params_json,payload_json,payload_sha256) VALUES ('raw','run','fixture','2026-11-09T10:00:00Z','{}','{}','hash')")
+        self.conn.execute("INSERT INTO raw_responses(raw_response_id,run_id,source_id,retrieved_at,request_params_json,payload_json,payload_sha256) VALUES ('raw-other','run','fixture','2026-11-09T10:00:00Z','{}','{\"other\":true}','other-hash')")
 
     def tearDown(self): self.conn.close(); self.tmp.cleanup()
 
@@ -49,6 +50,45 @@ class A13LifecycleTests(unittest.TestCase):
         with self.assertRaises(LifecycleError):
             register_snapshot_for_records(self.conn,snapshot_id='snap-2',event_id='evt-x',
               effective_at='2026-11-09T10:01:30Z',actor_id='g',reason='wrong membership',records=[replace(self.record,record_id='other')])
+
+    def test_publication_rejects_record_with_changed_raw_response_reference(self):
+        from dataclasses import replace
+        altered = replace(self.record, raw_response_id='raw-other')
+        with self.assertRaises(LifecycleError):
+            register_snapshot_for_records(self.conn, snapshot_id='snap-1', event_id='evt-bad',
+                effective_at='2026-11-09T10:01:30Z', actor_id='g', reason='altered provenance',
+                records=[altered])
+        self.assertEqual(self.conn.execute(
+            "SELECT COUNT(*) FROM a13_snapshot_lifecycle_events WHERE snapshot_id='snap-1'").fetchone()[0], 0)
+        self.assertEqual(self.conn.execute(
+            "SELECT COUNT(*) FROM a13_snapshot_raw_links WHERE snapshot_id='snap-1'").fetchone()[0], 0)
+
+    def test_publication_rejects_changed_record_content_hash(self):
+        from dataclasses import replace
+        altered = replace(self.record, content_hash='f' * 64)
+        with self.assertRaises(LifecycleError):
+            register_snapshot_for_records(self.conn, snapshot_id='snap-1', event_id='evt-bad',
+                effective_at='2026-11-09T10:01:30Z', actor_id='g', reason='altered content',
+                records=[altered])
+        self.assertEqual(self.conn.execute(
+            "SELECT COUNT(*) FROM a13_snapshot_lifecycle_events WHERE snapshot_id='snap-1'").fetchone()[0], 0)
+
+    def test_read_gate_rejects_registered_link_to_unapproved_raw_response(self):
+        register_snapshot(self.conn, snapshot_id='snap-1', event_id='evt-1',
+            effective_at='2026-11-09T10:01:30Z', actor_id='g', reason='bad raw link',
+            raw_response_ids=['raw-other'])
+        with self.assertRaises(SnapshotAccessDenied):
+            self._gate(require_lifecycle=True)
+
+    def test_read_gate_rejects_extra_persisted_raw_response_link(self):
+        register_snapshot(self.conn, snapshot_id='snap-1', event_id='evt-1',
+            effective_at='2026-11-09T10:01:30Z', actor_id='g', reason='publish',
+            raw_response_ids=['raw'])
+        self.conn.execute('DROP TRIGGER trg_a13_raw_links_no_update')
+        self.conn.execute('DROP TRIGGER trg_a13_raw_links_no_delete')
+        self.conn.execute("INSERT INTO a13_snapshot_raw_links VALUES ('snap-1','raw-other','2026-11-09T10:01:31Z')")
+        with self.assertRaises(SnapshotAccessDenied):
+            self._gate(require_lifecycle=True)
 
     def test_unregistered_snapshot_fails_required_lifecycle_gate(self):
         with self.assertRaises(SnapshotAccessDenied): self._gate(require_lifecycle=True)
