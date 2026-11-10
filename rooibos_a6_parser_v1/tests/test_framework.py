@@ -84,7 +84,7 @@ class CollectorFrameworkTests(unittest.TestCase):
         )
         self.framework.capture_response(
             ticket, raw_response_id='raw-pipeline',
-            payload={'provider_fixture':'synthetic', 'records':[
+            payload={'provider_fixture':'synthetic', 'identity':{'mint':'MintABC'}, 'records':[
                 {'timestamp_ms':1794225600000,'open':1,'high':1.2,'low':.9,'close':1.1,'volume':10},
                 {'timestamp_ms':1794226500000,'open':1.1,'high':1.3,'low':1,'close':1.2,'volume':12},
             ]},
@@ -100,6 +100,7 @@ class CollectorFrameworkTests(unittest.TestCase):
             self.framework, run_id='run1', raw_response_id='raw-pipeline',
             parse_context=context,
             request_identity_fields={'mint_address':'mint','interval':'interval'},
+            response_identity_fields={'mint_address':('identity','mint')},
             decode_payload=lambda payload: [
                 dict(row, candle_status='closed') for row in payload['records']
             ],
@@ -133,7 +134,7 @@ class CollectorFrameworkTests(unittest.TestCase):
         )
         self.framework.capture_response(
             ticket, raw_response_id='raw-empty',
-            payload={'provider_fixture':'synthetic', 'records':[]},
+            payload={'provider_fixture':'synthetic', 'identity':{'mint':'MintABC'}, 'records':[]},
             http_status=200, retrieved_at='2026-11-09T10:00:01Z', page_sequence=0,
         )
         context = ParseContext(
@@ -173,7 +174,7 @@ class CollectorFrameworkTests(unittest.TestCase):
         )
         raw_id = 'raw-mismatch-' + mismatch
         self.framework.capture_response(
-            ticket, raw_response_id=raw_id, payload={'records':[]},
+            ticket, raw_response_id=raw_id, payload={'identity':{'mint':'MintABC'}, 'records':[]},
             http_status=200, retrieved_at='2026-11-09T10:00:01Z', page_sequence=0,
         )
         context = ParseContext(
@@ -188,6 +189,7 @@ class CollectorFrameworkTests(unittest.TestCase):
                 self.framework, run_id='run1', raw_response_id=raw_id,
                 parse_context=context,
                 request_identity_fields={'mint_address':'mint','interval':'interval'},
+                response_identity_fields={'mint_address':('identity','mint')},
                 decode_payload=lambda payload: payload['records'],
                 snapshot_id='mismatch-' + mismatch,
                 source_policies={'moby': SourcePolicy('moby', ('ohlcv',), True)},
@@ -208,6 +210,25 @@ class CollectorFrameworkTests(unittest.TestCase):
 
     def test_a6_pipeline_rejects_mismatched_requested_interval(self):
         self._assert_a6_request_identity_mismatch_is_rejected(mismatch='interval')
+
+    def _assert_a6_response_identity_rejected(self, *, payload, expected_message):
+        self.create_run()
+        self.framework.transition('run1', 'configured')
+        ticket = self.framework.authorise_request('run1', {'mint':'MintABC','interval':'15m','limit':2})
+        self.framework.capture_response(ticket, raw_response_id='raw-response-identity', payload=payload, http_status=200, retrieved_at='2026-11-09T10:00:01Z', page_sequence=0)
+        context = ParseContext(chain='solana', asset_id='asset1', mint_address='MintABC', interval='15m', source_id='moby', endpoint_id='ohlcv', collection_run_id='run1', raw_response_ref='raw-response-identity')
+        with self.assertRaisesRegex(ValueError, expected_message):
+            process_a6_raw_response(self.framework, run_id='run1', raw_response_id='raw-response-identity', parse_context=context, request_identity_fields={'mint_address':'mint','interval':'interval'}, response_identity_fields={'mint_address':('identity','mint')}, decode_payload=lambda value: value['records'], snapshot_id='response-identity-rejected', source_policies={'moby': SourcePolicy('moby', ('ohlcv',), True)}, assessed_at='2026-11-09T10:02:00Z', decided_at='2026-11-09T10:03:00Z', effective_at='2026-11-09T10:04:00Z', actor_id='test-governance', reason='verify response market identity')
+        c = sqlite3.connect(self.db)
+        self.assertEqual(c.execute('SELECT COUNT(*) FROM ohlcv_candles').fetchone()[0], 0)
+        self.assertEqual(c.execute("SELECT status FROM collection_runs WHERE run_id='run1'").fetchone()[0], 'raw_captured')
+        c.close()
+
+    def test_a6_pipeline_rejects_response_for_different_mint(self):
+        self._assert_a6_response_identity_rejected(payload={'identity':{'mint':'OtherMint'}, 'records':[]}, expected_message='response mint identity does not match')
+
+    def test_a6_pipeline_rejects_response_without_market_identity(self):
+        self._assert_a6_response_identity_rejected(payload={'records':[]}, expected_message='missing mapped market identity path')
 
     def test_unknown_endpoint_is_default_denied(self):
         framework = CollectorFramework(self.db,[])
