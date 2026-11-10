@@ -4,6 +4,8 @@ from rooibos_a6.moby_adapter import (
     MobyOHLCVMappingError,
     MobyParallelOHLCVMapping,
     decode_moby_parallel_ohlcv,
+    documented_moby_ohlcv_mapping,
+    decode_moby_get_token_ohlcv,
 )
 
 
@@ -102,6 +104,28 @@ class MobyParallelAdapterTests(unittest.TestCase):
         rows = decode_moby_parallel_ohlcv(payload, mapping(timestamp_unit="milliseconds"))
         self.assertEqual(rows[0]["timestamp_ms"], 1800000000000)
 
+    def test_documented_moby_profile_uses_compact_keys_and_millisecond_time(self):
+        config = documented_moby_ohlcv_mapping(volume_unit="verified_usd")
+        payload = {"t": [1800000000000], "o": [10], "h": [12], "l": [9], "c": [11], "v": [100]}
+        rows = decode_moby_get_token_ohlcv(payload, config, include_in_progress_candle=False)
+        self.assertEqual(rows[0]["timestamp_ms"], 1800000000000)
+        self.assertEqual(rows[0]["candle_status"], "closed")
+
+    def test_moby_forming_candle_is_only_index_zero(self):
+        config = documented_moby_ohlcv_mapping(volume_unit="verified_usd")
+        payload = {"t": [1800000900000, 1800000000000], "o": [11, 10], "h": [13, 12], "l": [10, 9], "c": [12, 11], "v": [200, 100]}
+        rows = decode_moby_get_token_ohlcv(payload, config, include_in_progress_candle=True)
+        self.assertEqual([r["candle_status"] for r in rows], ["forming", "closed"])
+
+    def test_missing_request_evidence_does_not_assert_candle_closure(self):
+        config = documented_moby_ohlcv_mapping(volume_unit="verified_usd")
+        payload = {"t": [1800000000000], "o": [10], "h": [12], "l": [9], "c": [11], "v": [100]}
+        rows = decode_moby_get_token_ohlcv(payload, config, include_in_progress_candle=None)
+        self.assertEqual(rows[0]["candle_status"], "unconfirmed")
+
+    def test_moby_profile_requires_verified_volume_unit(self):
+        with self.assertRaises(ValueError):
+            documented_moby_ohlcv_mapping(volume_unit="unverified")
 
 if __name__ == "__main__":
     unittest.main()
