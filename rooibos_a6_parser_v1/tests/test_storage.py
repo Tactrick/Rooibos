@@ -163,7 +163,7 @@ class A6StorageTests(unittest.TestCase):
         context2 = ParseContext(
             chain="solana", asset_id="asset1", mint_address="MintABC", interval="15m",
             source_id="moby", endpoint_id="ohlcv", collection_run_id="run2",
-            raw_response_ref=second_raw_id,
+            raw_response_ref=second_raw_id, volume_unit="base_token",
         )
         result2 = normalise_records(self.records, context2)
         second = persist_parse_result(self.db, result=result2, raw_response_id=second_raw_id)
