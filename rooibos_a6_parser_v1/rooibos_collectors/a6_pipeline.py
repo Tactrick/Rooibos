@@ -1,0 +1,182 @@
+"""A6 raw-response-to-A13 pipeline orchestration.
+
+This is a provider-neutral execution seam: callers supply a pure decoder that
+maps an already-captured provider payload into A6's canonical record contract.
+It performs no network I/O and cannot invoke trading or wallet operations.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+import json
+from pathlib import Path
+import sqlite3
+from typing import Any, Callable, Iterable, Mapping
+
+from rooibos_db.database import _connect
+from rooibos_a6.parser import ParseContext, ParseResult, normalise_records
+from rooibos_a6.storage import persist_parse_result
+from rooibos_a13.models import SourcePolicy
+from rooibos_integrations.a13_projection import publish_a6_snapshot_from_storage
+
+from .framework import CollectorFramework
+
+
+@dataclass(frozen=True)
+class A6PipelineResult:
+    """Persisted result of processing one captured response through A13."""
+
+    parse_result: ParseResult
+    storage_result: Mapping[str, Any]
+    candle_ids: tuple[str, ...]
+    assessments: tuple[Any, ...]
+    decision: Any | None
+    grant: Any | None
+
+    @property
+    def published(self) -> bool:
+        return self.grant is not None
+
+
+def process_a6_raw_response(
+    db_path: str | Path,
+    framework: CollectorFramework,
+    *,
+    run_id: str,
+    raw_response_id: str,
+    parse_context: ParseContext,
+    decode_payload: Callable[[Any], Iterable[Mapping[str, Any]]],
+    snapshot_id: str,
+    source_policies: Mapping[str, SourcePolicy],
+    assessed_at: str,
+    decided_at: str,
+    effective_at: str,
+    actor_id: str,
+    reason: str,
+    allow_warnings: bool = False,
+    expected_record_ids: set[str] | None = None,
+) -> A6PipelineResult:
+    """Process one immutable captured response through parse, storage and A13.
+
+    `decode_payload` is the only provider-specific seam. It must be a pure
+    transformation and return records using A6's timestamp_ms/open/high/low/
+    close/volume contract. The payload is always read from immutable storage,
+    never accepted separately from the caller.
+
+    A run is marked completed only after A13 publication and its read gate
+    return an authorization grant. Parser/storage conflicts or rejected input
+    quarantine the run instead of publishing a partial candle snapshot.
+    """
+    if parse_context.collection_run_id != run_id:
+        raise ValueError("A6 ParseContext run ID does not match requested run")
+    if parse_context.raw_response_ref != raw_response_id:
+        raise ValueError("A6 ParseContext raw-response ID does not match requested evidence")
+    if not snapshot_id or not actor_id or not reason:
+        raise ValueError("snapshot_id, actor_id and reason are required")
+
+    conn = _connect(db_path)
+    try:
+        raw = conn.execute(
+            """SELECT rr.run_id, rr.source_id, rr.endpoint_id, rr.retrieved_at,
+                      rr.payload_json, cr.status
+               FROM raw_responses rr
+               JOIN collection_runs cr ON cr.run_id=rr.run_id
+               WHERE rr.raw_response_id=?""",
+            (raw_response_id,),
+        ).fetchone()
+        if raw is None:
+            raise ValueError("A6 processing requires an existing captured raw response")
+        if (raw["run_id"], raw["source_id"], raw["endpoint_id"]) != (
+            run_id, parse_context.source_id, parse_context.endpoint_id
+        ):
+            raise ValueError("A6 ParseContext provenance does not match persisted raw response")
+        if raw["status"] != "raw_captured":
+            raise ValueError(f"A6 response must be processed from raw_captured state, not {raw['status']!r}")
+        payload = json.loads(raw["payload_json"])
+    finally:
+        conn.close()
+
+    try:
+        records = list(decode_payload(payload))
+        if any(not isinstance(item, Mapping) for item in records):
+            raise TypeError("A6 provider decoder must return mapping records")
+
+        framework.transition(run_id, "parsed")
+        parsed = normalise_records(records, parse_context)
+        stored = persist_parse_result(
+            db_path, result=parsed, raw_response_id=raw_response_id,
+        )
+
+        conn = _connect(db_path)
+        try:
+            candle_ids = tuple(row[0] for row in conn.execute(
+                """SELECT DISTINCT candle_id FROM a6_candle_evidence_links
+                   WHERE raw_response_id=? ORDER BY candle_id""",
+                (raw_response_id,),
+            ).fetchall())
+        finally:
+            conn.close()
+
+        framework.transition(run_id, "validating")
+
+        # Do not allow an otherwise-valid subset to conceal rejected records,
+        # conflicting variants or conflicts with already-persisted candles.
+        blocking_parse_findings = (
+            parsed.rejected_count > 0
+            or parsed.conflict_count > 0
+            or stored["storage_conflict_count"] > 0
+            or stored["parser_conflict_variant_count"] > 0
+        )
+        if not candle_ids or blocking_parse_findings:
+            framework.transition(
+                run_id, "quarantined",
+                error_summary=(
+                    "A6 output withheld from A13: "
+                    f"candles={len(candle_ids)}, rejected={parsed.rejected_count}, "
+                    f"parser_conflicts={parsed.conflict_count}, "
+                    f"storage_conflicts={stored['storage_conflict_count']}"
+                ),
+            )
+            return A6PipelineResult(parsed, stored, candle_ids, (), None, None)
+
+        conn = _connect(db_path)
+        try:
+            records_a13, assessments, decision, grant = publish_a6_snapshot_from_storage(
+                conn, candle_ids, snapshot_id=snapshot_id,
+                source_policies=source_policies, assessed_at=assessed_at,
+                decided_at=decided_at, effective_at=effective_at,
+                actor_id=actor_id, reason=reason,
+                allow_warnings=allow_warnings,
+                expected_record_ids=expected_record_ids,
+            )
+        finally:
+            conn.close()
+
+        if grant is None:
+            framework.transition(
+                run_id, "quarantined",
+                error_summary=f"A13 decision quarantined snapshot: {decision.dataset_status}",
+            )
+        else:
+            framework.transition(run_id, "completed")
+        return A6PipelineResult(
+            parsed, stored, candle_ids, tuple(assessments), decision, grant,
+        )
+    except Exception as exc:
+        # Preserve the failure in the run ledger without masking the original
+        # processing exception if a transition itself is no longer possible.
+        try:
+            conn = _connect(db_path)
+            try:
+                row = conn.execute(
+                    "SELECT status FROM collection_runs WHERE run_id=?", (run_id,)
+                ).fetchone()
+            finally:
+                conn.close()
+            if row and row["status"] == "normalised":
+                framework.transition(run_id, "validating")
+                framework.transition(run_id, "failed", error_summary=str(exc)[:1000])
+            elif row and row["status"] in {"raw_captured", "parsed", "validating", "partial"}:
+                framework.transition(run_id, "failed", error_summary=str(exc)[:1000])
+        except Exception:
+            pass
+        raise
