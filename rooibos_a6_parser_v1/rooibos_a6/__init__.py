@@ -1,3 +1,6 @@
+from .moby_adapter import (
+    MobyOHLCVMappingError, MobyParallelOHLCVMapping, decode_moby_parallel_ohlcv,
+)
 from .parser import (
     Candle, Finding, ParseContext, ParseResult, ParserError,
     assess_completeness, normalise_records,
@@ -6,4 +9,5 @@ from .parser import (
 __all__ = [
     "Candle", "Finding", "ParseContext", "ParseResult", "ParserError",
     "assess_completeness", "normalise_records",
+    "MobyOHLCVMappingError", "MobyParallelOHLCVMapping", "decode_moby_parallel_ohlcv",
 ]
