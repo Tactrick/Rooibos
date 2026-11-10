@@ -111,6 +111,58 @@ def project_a6_from_storage(conn, candle_id: str):
 
 
 
+
+def project_a1_from_storage(conn, observation_keys):
+    """Rebuild exact A1 evidence records from append-only discovery storage."""
+    from rooibos_a1.models import DiscoveryContext, DiscoveryObservation, TokenMetadata
+
+    keys = list(observation_keys)
+    if not keys or len(keys) != len(set(keys)):
+        raise ValueError("A1 snapshot requires a non-empty unique observation-key set")
+    placeholders = ",".join("?" for _ in keys)
+    sql = "SELECT * FROM token_discovery_observations WHERE observation_key IN (" + placeholders + ")"
+    rows = conn.execute(sql, keys).fetchall()
+    by_key = {row["observation_key"]: row for row in rows}
+    if set(by_key) != set(keys):
+        raise ValueError("A1 snapshot membership does not match persisted observations")
+
+    projected = []
+    for key in keys:
+        row = by_key[key]
+        context = DiscoveryContext(
+            row["chain"], row["mint"], row["source_id"], row["endpoint_id"],
+            row["run_id"], row["raw_response_id"], row["source_record_index"],
+            row["observed_at"], row["normalization_version"],
+        )
+        metadata = TokenMetadata(
+            row["symbol"], row["name"], row["decimals"], row["creator"],
+            row["source_created_at"], row["source_first_seen_at"], row["launchpad"],
+            row["website"], json.loads(row["social_links_json"]) if row["social_links_json"] else None,
+        )
+        observation = DiscoveryObservation(
+            context, metadata, row["provider_record_id"],
+            json.loads(row["raw_record_json"]), row["content_hash"], row["observation_key"],
+        )
+        projected.append(project_a1(observation))
+    return projected
+
+
+def publish_a1_snapshot_from_storage(conn, observation_keys, *, snapshot_id: str,
+                                     source_policies: Mapping[str, SourcePolicy],
+                                     assessed_at: str, decided_at: str, effective_at: str,
+                                     actor_id: str, reason: str,
+                                     allow_warnings: bool = False,
+                                     expected_record_ids: set[str] | None = None):
+    """Publish persisted A1 observations through the shared A13 read boundary."""
+    records = project_a1_from_storage(conn, observation_keys)
+    return publish_evidence_snapshot(
+        conn, records, snapshot_id=snapshot_id, source_policies=source_policies,
+        assessed_at=assessed_at, decided_at=decided_at, effective_at=effective_at,
+        actor_id=actor_id, reason=reason, allow_warnings=allow_warnings,
+        expected_record_ids=expected_record_ids,
+    )
+
+
 def publish_evidence_snapshot(conn, records, *, snapshot_id: str,
                               source_policies: Mapping[str, SourcePolicy],
                               assessed_at: str, decided_at: str, effective_at: str,
