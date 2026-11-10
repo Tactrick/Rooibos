@@ -13,6 +13,8 @@ from rooibos_collectors import (
 )
 from rooibos_a6.parser import ParseContext, normalise_records
 from rooibos_a6.storage import persist_parse_result
+from rooibos_collectors.a6_pipeline import process_a6_raw_response
+from rooibos_a13.models import SourcePolicy
 
 
 class CollectorFrameworkTests(unittest.TestCase):
@@ -72,6 +74,54 @@ class CollectorFrameworkTests(unittest.TestCase):
         self.assertEqual(c.execute('SELECT status FROM collection_runs WHERE run_id=?',('run1',)).fetchone()[0],'normalised')
         c.close()
         self.assertTrue(check_integrity(self.db)['ok'])
+
+
+    def test_a6_raw_capture_to_a13_publication_end_to_end(self):
+        self.create_run()
+        self.framework.transition('run1', 'configured')
+        ticket = self.framework.authorise_request(
+            'run1', {'mint':'MintABC','interval':'15m','limit':2}
+        )
+        self.framework.capture_response(
+            ticket, raw_response_id='raw-pipeline',
+            payload={'provider_fixture':'synthetic', 'records':[
+                {'timestamp_ms':1794225600000,'open':1,'high':1.2,'low':.9,'close':1.1,'volume':10},
+                {'timestamp_ms':1794226500000,'open':1.1,'high':1.3,'low':1,'close':1.2,'volume':12},
+            ]},
+            http_status=200, retrieved_at='2026-11-09T10:00:01Z', page_sequence=0,
+        )
+        context = ParseContext(
+            chain='solana', asset_id='asset1', mint_address='MintABC',
+            interval='15m', source_id='moby', endpoint_id='ohlcv',
+            collection_run_id='run1', raw_response_ref='raw-pipeline',
+            volume_unit='base_token',
+        )
+        outcome = process_a6_raw_response(
+            self.framework, run_id='run1', raw_response_id='raw-pipeline',
+            parse_context=context,
+            decode_payload=lambda payload: [
+                dict(row, candle_status='closed') for row in payload['records']
+            ],
+            snapshot_id='a6-e2e-snapshot',
+            source_policies={'moby': SourcePolicy('moby', ('ohlcv',), True)},
+            assessed_at='2026-11-09T10:02:00Z',
+            decided_at='2026-11-09T10:03:00Z',
+            effective_at='2026-11-09T10:04:00Z',
+            actor_id='test-governance', reason='verify complete A6 publication path',
+        )
+        self.assertTrue(outcome.published)
+        self.assertEqual(len(outcome.candle_ids), 2)
+        self.assertEqual(outcome.decision.dataset_status, 'approved_for_research')
+        c = sqlite3.connect(self.db)
+        self.assertEqual(
+            c.execute("SELECT status FROM collection_runs WHERE run_id='run1'").fetchone()[0],
+            'completed',
+        )
+        self.assertEqual(
+            c.execute("SELECT COUNT(*) FROM a13_snapshot_raw_links WHERE snapshot_id='a6-e2e-snapshot'").fetchone()[0],
+            1,
+        )
+        c.close()
 
     def test_unknown_endpoint_is_default_denied(self):
         framework = CollectorFramework(self.db,[])
