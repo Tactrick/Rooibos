@@ -13,7 +13,8 @@ sys.path.insert(0, str(DB_ROOT))
 from rooibos_db.database import initialize_database, check_integrity
 from rooibos_a6.parser import ParseContext, normalise_records
 from rooibos_a6.storage import store_raw_response, persist_parse_result
-from rooibos_integrations.a13_projection import project_a6_from_storage
+from rooibos_integrations.a13_projection import project_a6_from_storage, publish_a6_snapshot_from_storage
+from rooibos_a13.models import SourcePolicy
 
 
 class A6StorageTests(unittest.TestCase):
@@ -180,6 +181,34 @@ class A6StorageTests(unittest.TestCase):
         projected = project_a6_from_storage(c, candle_id)
         self.assertEqual({record.raw_response_id for record in projected}, {"raw1", "raw2"})
         self.assertEqual(len(projected), 2)
+        c.close()
+
+
+    def test_a6_storage_to_a13_publication_and_read_gate_uses_all_evidence(self):
+        persist_parse_result(self.db, result=self.parse(), raw_response_id=self.raw_id)
+        c = sqlite3.connect(self.db)
+        c.row_factory = sqlite3.Row
+        candle_ids = [row["candle_id"] for row in c.execute(
+            "SELECT candle_id FROM ohlcv_candles ORDER BY open_time_ms"
+        )]
+        records, assessments, decision, grant = publish_a6_snapshot_from_storage(
+            c, candle_ids, snapshot_id="a6-storage-published",
+            source_policies={"moby": SourcePolicy("moby", ("ohlcv",), True)},
+            assessed_at="2026-11-09T10:02:00Z",
+            decided_at="2026-11-09T10:03:00Z",
+            effective_at="2026-11-09T10:04:00Z",
+            actor_id="test-governance", reason="publish synthetic A6 fixture",
+        )
+        self.assertIn(decision.dataset_status, ("approved_for_research", "approved_with_warnings"))
+        self.assertIsNotNone(grant)
+        self.assertEqual(set(grant.record_ids), {record.record_id for record in records})
+        expected_raw = {record.raw_response_id for record in records}
+        linked_raw = {row[0] for row in c.execute(
+            "SELECT raw_response_id FROM a13_snapshot_raw_links WHERE snapshot_id=?",
+            ("a6-storage-published",),
+        )}
+        self.assertEqual(linked_raw, expected_raw)
+        self.assertEqual(expected_raw, {"raw1"})
         c.close()
 
 if __name__ == '__main__':
