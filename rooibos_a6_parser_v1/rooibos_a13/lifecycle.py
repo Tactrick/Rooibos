@@ -164,14 +164,29 @@ def register_snapshot(conn: sqlite3.Connection, *, snapshot_id: str, event_id: s
 
 def register_snapshot_for_records(conn: sqlite3.Connection, *, snapshot_id: str, event_id: str,
                                   effective_at: str, actor_id: str, reason: str, records) -> None:
-    decision = conn.execute("SELECT record_ids_json FROM a13_snapshot_decisions WHERE snapshot_id=?", (snapshot_id,)).fetchone()
-    if decision is None: raise LifecycleError("snapshot decision does not exist")
+    decision = conn.execute(
+        "SELECT dataset_type, record_ids_json, dataset_status, snapshot_content_hash "
+        "FROM a13_snapshot_decisions WHERE snapshot_id=?", (snapshot_id,)
+    ).fetchone()
+    if decision is None:
+        raise LifecycleError("snapshot decision does not exist")
+    dataset_type, record_ids_json, status, approved_hash = decision
+    if status not in ("approved_for_research", "approved_with_warnings"):
+        raise LifecycleError("only an approved snapshot can be published")
     records = list(records)
-    expected = set(json.loads(decision[0]))
+    expected = set(json.loads(record_ids_json))
     supplied = {record.record_id for record in records}
-    if expected != supplied or not supplied:
+    if expected != supplied or not supplied or len(supplied) != len(records):
         raise LifecycleError("records supplied for publication do not match approved snapshot membership")
+    if any(record.dataset_type != dataset_type for record in records):
+        raise LifecycleError("record dataset type differs from approved snapshot")
+    # Import locally to avoid a module-level lifecycle/read-gate import cycle.
+    from .read_gate import snapshot_content_hash
+    if not approved_hash or snapshot_content_hash(records) != approved_hash:
+        raise LifecycleError("record content or raw-evidence provenance differs from approved snapshot")
     raw_ids = {record.raw_response_id for record in records}
+    if None in raw_ids or "" in raw_ids:
+        raise LifecycleError("every approved record must reference a raw response")
     register_snapshot(conn, snapshot_id=snapshot_id, event_id=event_id, effective_at=effective_at,
                       actor_id=actor_id, reason=reason, raw_response_ids=raw_ids)
 
