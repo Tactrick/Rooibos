@@ -70,15 +70,25 @@ def assess_and_store_snapshot(conn, records: Iterable[EvidenceRecord], *, snapsh
     if len(dataset_types) != 1:
         raise ValueError("one A13 snapshot must contain exactly one dataset type")
     assessments = [assess_record(r, source_policies, assessed_at=assessed_at) for r in rows]
-    for a in assessments:
-        ah = canonical_hash({"record_id": a.record_id, "status": a.status,
-                             "findings": [asdict(f) for f in a.findings],
-                             "assessed_at": a.assessed_at, "validator_version": a.validator_version})
-        store_assessment(conn, a, "assessment:" + ah[:32], ah)
     decision = decide_snapshot(snapshot_id, next(iter(dataset_types)), assessments,
                                decided_at=decided_at, allow_warnings=allow_warnings,
                                conflict_record_ids=conflict_record_ids,
                                expected_record_ids=expected_record_ids,
                                snapshot_hash=snapshot_content_hash(rows))
-    store_decision(conn, decision)
+    # Assessments and their snapshot decision are one publication unit. A failed
+    # immutable decision insert must not leave orphaned assessment rows behind.
+    conn.execute("SAVEPOINT a13_assess_store_snapshot")
+    try:
+        for a in assessments:
+            ah = canonical_hash({"record_id": a.record_id, "status": a.status,
+                                 "findings": [asdict(f) for f in a.findings],
+                                 "assessed_at": a.assessed_at, "validator_version": a.validator_version})
+            store_assessment(conn, a, "assessment:" + ah[:32], ah, commit=False)
+        store_decision(conn, decision, commit=False)
+        conn.execute("RELEASE SAVEPOINT a13_assess_store_snapshot")
+        conn.commit()
+    except Exception:
+        conn.execute("ROLLBACK TO SAVEPOINT a13_assess_store_snapshot")
+        conn.execute("RELEASE SAVEPOINT a13_assess_store_snapshot")
+        raise
     return assessments, decision
