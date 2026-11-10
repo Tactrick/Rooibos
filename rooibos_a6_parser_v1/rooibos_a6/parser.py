@@ -163,7 +163,15 @@ def normalise_records(records: Iterable[Mapping[str, Any]], context: ParseContex
     result.input_sha256 = hashlib.sha256(_canonical_json(materialised).encode()).hexdigest()
     candidates: list[Candle] = []
 
-    for index, row in enumerate(materialised):
+    seen_source_indices: set[int] = set()
+    for position, row in enumerate(materialised):
+        source_index = row.get("source_record_index", position)
+        if isinstance(source_index, bool) or not isinstance(source_index, int) or source_index < 0:
+            raise ParserError("source_record_index must be a non-negative integer")
+        if source_index in seen_source_indices:
+            raise ParserError(f"Duplicate source_record_index: {source_index}")
+        seen_source_indices.add(source_index)
+        index = source_index
         missing = [name for name in REQUIRED_FIELDS if name not in row]
         if missing:
             raise ParserError(f"Record {index} missing required fields: {', '.join(missing)}")
