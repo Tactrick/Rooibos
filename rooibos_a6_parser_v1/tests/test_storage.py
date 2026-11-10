@@ -230,5 +230,42 @@ class A6StorageTests(unittest.TestCase):
         self.assertEqual(expected_raw, {"raw1"})
         c.close()
 
+
+    def test_a13_publication_rolls_back_everything_if_read_gate_fails_after_lifecycle_registration(self):
+        persist_parse_result(self.db, result=self.parse(), raw_response_id=self.raw_id)
+        c = sqlite3.connect(self.db)
+        c.row_factory = sqlite3.Row
+        candle_ids = [row["candle_id"] for row in c.execute(
+            "SELECT candle_id FROM ohlcv_candles ORDER BY open_time_ms"
+        )]
+
+        # Inject failure at the final gate, after assessment, decision,
+        # lifecycle registration and raw-evidence linking have been staged.
+        from unittest.mock import patch
+        with patch("rooibos_a13.read_gate.authorize_snapshot",
+                   side_effect=RuntimeError("injected final read-gate failure")):
+            with self.assertRaisesRegex(RuntimeError, "injected final read-gate failure"):
+                publish_a6_snapshot_from_storage(
+                    c, candle_ids, snapshot_id="a6-atomic-failure",
+                    source_policies={"moby": SourcePolicy("moby", ("ohlcv",), True)},
+                    assessed_at="2026-11-09T10:02:00Z",
+                    decided_at="2026-11-09T10:03:00Z",
+                    effective_at="2026-11-09T10:04:00Z",
+                    actor_id="test-governance", reason="exercise atomic rollback",
+                )
+
+        for table in (
+            "a13_record_assessments",
+            "a13_snapshot_decisions",
+            "a13_snapshot_lifecycle_events",
+            "a13_snapshot_raw_links",
+        ):
+            count = c.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE snapshot_id=?",
+                ("a6-atomic-failure",),
+            ).fetchone()[0]
+            self.assertEqual(count, 0, f"{table} retained partial publication rows")
+        c.close()
+
 if __name__ == '__main__':
     unittest.main()
