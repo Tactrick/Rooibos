@@ -149,13 +149,20 @@ class CollectorFramework:
         try:
             conn.execute("BEGIN IMMEDIATE")
             run = conn.execute(
-                "SELECT status FROM collection_runs WHERE run_id=?", (run_id,)
+                "SELECT status, source_id, endpoint_id FROM collection_runs WHERE run_id=?", (run_id,)
             ).fetchone()
             if run is None:
                 raise KeyError(f"Unknown collection run: {run_id}")
             if run["status"] != "validating":
                 raise InvalidRunTransition(
                     f"A13 publication can complete only a validating run, not {run['status']!r}"
+                )
+            if any(
+                (record.source_id, record.endpoint_id) != (run["source_id"], run["endpoint_id"])
+                for record in rows
+            ):
+                raise InvalidRunTransition(
+                    "A13 evidence source/endpoint does not match the collection run"
                 )
 
             for record in rows:
