@@ -56,6 +56,19 @@ class A13PipelineIntegrationTests(unittest.TestCase):
             allowed_policy_versions={decision.policy_version}, now="2026-11-09T10:03:00Z")
         self.assertEqual(grant.record_ids, (record.record_id,))
 
+        # The supplied payload is mutable even though EvidenceRecord is frozen.
+        # Reusing the approved content_hash must not let a consumer substitute it.
+        from dataclasses import replace
+        altered = replace(record, payload={**record.payload, "symbol": "ALTERED"})
+        self.assertEqual(snapshot_content_hash([altered]), snapshot_content_hash([record]))
+        with self.assertRaisesRegex(SnapshotAccessDenied, "payload hash"):
+            authorize_snapshot(
+                self.conn, snapshot_id="snap-a1", records=[altered],
+                expected_snapshot_hash=snapshot_content_hash([altered]),
+                expected_assessments_hash=decision.assessments_hash,
+                allowed_policy_versions={decision.policy_version}, now="2026-11-09T10:03:00Z"
+            )
+
 
     def test_a13_read_gate_requires_exact_record_raw_response_and_source_index_links(self):
         self.conn.execute("INSERT INTO sources(source_id,source_name,source_type) VALUES ('fixture_source','Fixture','api')")
