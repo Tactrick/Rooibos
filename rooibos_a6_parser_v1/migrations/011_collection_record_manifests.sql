@@ -1,5 +1,5 @@
 -- Immutable source-record coverage receipt for publication-only recovery.
--- One receipt per single-response A1/A2/A6 collection run. The canonical JSON
+-- Publication failures are tracked separately from the run status so a generic\n-- failed run can never be mistaken for a retryable publication failure.\nALTER TABLE collection_runs ADD COLUMN publication_failed_at TEXT;\nALTER TABLE collection_runs ADD COLUMN publication_failure_summary TEXT;\n\n-- One receipt per single-response A1/A2/A6 collection run. The canonical JSON
 -- records the complete source-index -> normalized-record-ID mapping established
 -- during initial normalization, before A13 publication is attempted.
 CREATE TABLE collection_record_manifests (
