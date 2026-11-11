@@ -28,10 +28,25 @@ def persist_a2_result(db_path: str | Path, *, result: A2Result) -> dict:
             run = conn.execute("SELECT status FROM collection_runs WHERE run_id=?",(o.run_id,)).fetchone()
             if not run or run["status"] not in {"raw_captured","parsed","normalised","validating","partial"}:
                 raise ValueError("A2 persistence requires a captured/parsed collection run")
-            existing = conn.execute("SELECT content_sha256 FROM market_observations WHERE observation_id=?",(o.observation_id,)).fetchone()
+            existing = conn.execute(
+                """SELECT chain,mint_address,market_id,pool_address,market_scope,metric_code,
+                          numeric_value,text_value,value_status,unit,quote_currency,window_seconds,
+                          measurement_kind,observed_at,source_id,endpoint_id,run_id,raw_response_id,
+                          source_record_index,normalization_version,metadata_json,content_sha256
+                   FROM market_observations WHERE observation_id=?""",
+                (o.observation_id,),
+            ).fetchone()
+            values = (
+                o.chain,o.mint_address,o.market_id,o.pool_address,o.market_scope,o.metric_code,
+                o.numeric_value,o.text_value,o.value_status,o.unit,o.quote_currency,o.window_seconds,
+                o.measurement_kind,o.observed_at,o.source_id,o.endpoint_id,o.run_id,o.raw_response_id,
+                o.source_record_index,o.normalization_version,o.metadata_json,o.content_sha256,
+            )
             if existing:
-                if existing["content_sha256"] != o.content_sha256:
-                    raise ValueError("Observation ID collision with different content")
+                if tuple(existing) != values:
+                    raise ValueError(
+                        "Observation ID collision with different content or provenance"
+                    )
                 replayed += 1
                 continue
             conn.execute("""INSERT INTO market_observations(
