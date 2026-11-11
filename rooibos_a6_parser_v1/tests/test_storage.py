@@ -414,5 +414,38 @@ class A6StorageTests(unittest.TestCase):
         self.assertEqual(c.execute("SELECT COUNT(*) FROM a6_candle_evidence_links").fetchone()[0], 2)
         c.close()
 
+    def test_market_identity_is_checked_on_identical_candle_replay(self):
+        c = sqlite3.connect(self.db)
+        c.execute("INSERT INTO assets(asset_id,chain,token_address,symbol) VALUES ('asset2','solana','OtherMint','OTH')")
+        c.execute("INSERT INTO markets(market_id,asset_id,source_id,market_address) VALUES ('market1','asset1','moby','PoolABC')")
+        c.commit()
+        c.close()
+
+        market_context = replace(self.context, market_id="market1")
+        parsed = normalise_records(self.records, market_context)
+        persist_parse_result(self.db, result=parsed, raw_response_id=self.raw_id)
+
+        # Simulate a corrupted/mis-associated market registry row while keeping
+        # the canonical candle and its evidence link intact.
+        c = sqlite3.connect(self.db)
+        c.execute("UPDATE markets SET asset_id='asset2' WHERE market_id='market1'")
+        c.commit()
+        before = c.execute(
+            "SELECT COUNT(*) FROM a6_candle_evidence_links"
+        ).fetchone()[0]
+        c.close()
+
+        with self.assertRaisesRegex(ValueError, "Market identity is not registered for this asset"):
+            persist_parse_result(self.db, result=parsed, raw_response_id=self.raw_id)
+
+        c = sqlite3.connect(self.db)
+        self.assertEqual(c.execute(
+            "SELECT COUNT(*) FROM a6_candle_evidence_links"
+        ).fetchone()[0], before)
+        self.assertEqual(c.execute(
+            "SELECT COUNT(*) FROM normalization_events"
+        ).fetchone()[0], 1, "failed replay must not persist a normalization event")
+        c.close()
+
 if __name__ == '__main__':
     unittest.main()
