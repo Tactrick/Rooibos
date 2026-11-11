@@ -168,6 +168,26 @@ def process_a6_raw_response(
             db_path, result=parsed, raw_response_id=raw_response_id,
         )
 
+        if records:
+            from .record_manifest import store_record_manifest
+            manifest_conn = _connect(db_path)
+            try:
+                links = manifest_conn.execute(
+                    """SELECT source_record_index, candle_id FROM a6_candle_evidence_links
+                       WHERE raw_response_id=? ORDER BY source_record_index, candle_id""",
+                    (raw_response_id,),
+                ).fetchall()
+                membership = {}
+                for link in links:
+                    membership.setdefault(link["source_record_index"], []).append(link["candle_id"])
+                store_record_manifest(
+                    manifest_conn, run_id=run_id, raw_response_id=raw_response_id,
+                    collector_module="A6", source_record_count=records[0]["source_record_count"],
+                    membership=membership,
+                )
+            finally:
+                manifest_conn.close()
+
         conn = _connect(db_path)
         try:
             candle_ids = tuple(row[0] for row in conn.execute(
