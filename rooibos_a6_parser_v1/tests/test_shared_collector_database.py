@@ -169,7 +169,7 @@ class SharedCollectorDatabaseRehearsalTests(unittest.TestCase):
             request_identity_fields={"mint_address": "mint", "interval": "interval"},
             response_identity_fields={"mint_address": ("mint",)},
             decode_payload=decode_a6, snapshot_id="shared-snap-a6",
-            source_policies=SOURCE_POLICIES, **TIMES,
+            source_policies=SOURCE_POLICIES, expected_candle_count=2, **TIMES,
         )
         self.assertTrue(a6.published)
         self.assertEqual(len(a6.candle_ids), 2)
@@ -313,7 +313,7 @@ class SharedCollectorDatabaseRehearsalTests(unittest.TestCase):
             request_identity_fields={"mint_address": "mint", "interval": "interval"},
             response_identity_fields={"mint_address": ("mint",)},
             decode_payload=decode_a6, snapshot_id="mixed-snap-a6",
-            source_policies=mixed_policies, **TIMES,
+            source_policies=mixed_policies, expected_candle_count=2, **TIMES,
         )
         self.assertTrue(a6.published)
         self.assertEqual(len(a6.candle_ids), 2)
