@@ -205,6 +205,68 @@ class A1A2CollectorToA13E2ETests(unittest.TestCase):
         finally:
             conn.close()
 
+    def test_a2_publication_and_completion_share_one_rollback_boundary(self):
+        raw_id = "raw-a2-atomic-completion"
+        run_id = self._capture("A2", {"records":[{"liquidity":1234.5}]}, raw_id)
+
+        def decode(payload, provenance):
+            return [MarketObservationInput(
+                chain="solana", mint_address=MINT, observed_at=provenance.retrieved_at,
+                source_id=provenance.source_id, endpoint_id=provenance.endpoint_id,
+                run_id=provenance.run_id, raw_response_id=provenance.raw_response_id,
+                source_record_index=index,
+                metrics=(MarketMetricInput("liquidity", row["liquidity"]),),
+                market_scope="token_aggregated", source_record_count=len(payload["records"]),
+            ) for index, row in enumerate(payload["records"])]
+
+        conn = _connect(self.db)
+        try:
+            assessments_before = conn.execute(
+                "SELECT COUNT(*) FROM a13_record_assessments"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+
+        from rooibos_integrations.a13_projection import publish_a2_snapshot_from_storage as real_publish
+
+        def publish_then_invalidate(conn, *args, **kwargs):
+            self.assertTrue(conn.in_transaction)
+            result = real_publish(conn, *args, **kwargs)
+            # Simulate a state change discovered at the final completion gate.
+            # Publication and collector completion must roll back together.
+            conn.execute(
+                "UPDATE collection_runs SET status='cancelled' WHERE run_id=?", (run_id,)
+            )
+            return result
+
+        with patch("rooibos_collectors.a2_pipeline.publish_a2_snapshot_from_storage",
+                   side_effect=publish_then_invalidate):
+            with self.assertRaisesRegex(Exception, "validating"):
+                process_a2_raw_response(
+                    self.framework, run_id=run_id, raw_response_id=raw_id,
+                    decode_payload=decode, snapshot_id="snap-a2-atomic-completion",
+                    source_policies=POLICIES, **self._times(),
+                )
+
+        conn = _connect(self.db)
+        try:
+            self.assertEqual(conn.execute(
+                "SELECT status FROM collection_runs WHERE run_id=?", (run_id,)
+            ).fetchone()[0], "failed")
+            self.assertEqual(conn.execute(
+                "SELECT COUNT(*) FROM a13_record_assessments"
+            ).fetchone()[0], assessments_before)
+            for table in (
+                "a13_snapshot_decisions", "a13_snapshot_lifecycle_events",
+                "a13_snapshot_evidence_links", "a13_snapshot_raw_links",
+            ):
+                self.assertEqual(conn.execute(
+                    f"SELECT COUNT(*) FROM {table} WHERE snapshot_id=?",
+                    ("snap-a2-atomic-completion",),
+                ).fetchone()[0], 0, table)
+        finally:
+            conn.close()
+
     def test_a1_validation_state_allows_exact_replay_but_rejects_new_observations(self):
         raw_id = "raw-a1-validation-lock"
         run_id = self._capture("A1", {"records":[{"symbol":"FIRST"},{"symbol":"SECOND"}]}, raw_id)
