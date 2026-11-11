@@ -6,6 +6,7 @@ from pathlib import Path
 from rooibos_db.database import (
     MIGRATION_001_SQL, MIGRATION_002_SQL, MIGRATION_003_SQL, MIGRATION_004_SQL,
     MIGRATION_005_SQL, MIGRATION_006_SQL, MIGRATION_007_SQL, MIGRATION_008_SQL,
+    MIGRATION_009_SQL, MIGRATION_010_SQL, migration_checksum,
     apply_migrations, backup_database, check_integrity,
     initialize_database, restore_database, _connect
 )
@@ -235,6 +236,47 @@ class Migration001Tests(unittest.TestCase):
         sqls = {1: MIGRATION_001_SQL, 2: MIGRATION_002_SQL, 3: MIGRATION_003_SQL,
                 4: MIGRATION_004_SQL, 5: MIGRATION_005_SQL, 6: MIGRATION_006_SQL, 7: MIGRATION_007_SQL}
         self.assertEqual({v: migration_checksum(sqls[v]) for v in expected}, expected)
+
+    def test_migrations_008_to_010_checksums_are_persisted_and_immutable(self):
+        initialize_database(self.db)
+        expected_sql = {
+            8: MIGRATION_008_SQL,
+            9: MIGRATION_009_SQL,
+            10: MIGRATION_010_SQL,
+        }
+        conn = _connect(self.db)
+        try:
+            stored = {
+                row["version"]: row["checksum_sha256"]
+                for row in conn.execute(
+                    "SELECT version, checksum_sha256 FROM schema_migrations "
+                    "WHERE version BETWEEN 8 AND 10"
+                )
+            }
+            self.assertEqual(
+                stored,
+                {version: migration_checksum(sql) for version, sql in expected_sql.items()},
+            )
+            for version, sql in expected_sql.items():
+                with self.subTest(version=version):
+                    with self.assertRaisesRegex(RuntimeError, "checksum"):
+                        apply_migrations(
+                            conn,
+                            [(version, f"Changed migration {version}", sql + "\\n-- injected drift")],
+                        )
+            self.assertEqual(
+                {
+                    row["version"]: row["checksum_sha256"]
+                    for row in conn.execute(
+                        "SELECT version, checksum_sha256 FROM schema_migrations "
+                        "WHERE version BETWEEN 8 AND 10"
+                    )
+                },
+                stored,
+            )
+            self.assertEqual(check_integrity(self.db)["ok"], True)
+        finally:
+            conn.close()
 
     def test_checksum_drift_is_rejected(self):
         initialize_database(self.db)
