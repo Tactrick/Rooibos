@@ -121,6 +121,14 @@ class A1A2CollectorToA13E2ETests(unittest.TestCase):
                 row, field_map={"symbol":"symbol"},
             ) for index, row in enumerate(payload["records"])]
 
+        conn = _connect(self.db)
+        try:
+            assessments_before = conn.execute(
+                "SELECT COUNT(*) FROM a13_record_assessments"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+
         from rooibos_integrations.a13_projection import publish_a1_snapshot_from_storage as real_publish
 
         def publish_then_invalidate(conn, *args, **kwargs):
@@ -147,10 +155,12 @@ class A1A2CollectorToA13E2ETests(unittest.TestCase):
             self.assertEqual(conn.execute(
                 "SELECT status FROM collection_runs WHERE run_id=?", (run_id,)
             ).fetchone()[0], "failed")
+            self.assertEqual(conn.execute(
+                "SELECT COUNT(*) FROM a13_record_assessments"
+            ).fetchone()[0], assessments_before)
             for table in (
-                "a13_record_assessments", "a13_snapshot_decisions",
-                "a13_snapshot_lifecycle_events", "a13_snapshot_evidence_links",
-                "a13_snapshot_raw_links",
+                "a13_snapshot_decisions", "a13_snapshot_lifecycle_events",
+                "a13_snapshot_evidence_links", "a13_snapshot_raw_links",
             ):
                 self.assertEqual(conn.execute(
                     f"SELECT COUNT(*) FROM {table} WHERE snapshot_id=?",
