@@ -177,7 +177,7 @@ def process_a6_raw_response(
                        WHERE raw_response_id=? ORDER BY source_record_index, candle_id""",
                     (raw_response_id,),
                 ).fetchall()
-                membership = {}
+                membership = {i: [] for i in range(records[0]["source_record_count"])}
                 for link in links:
                     membership.setdefault(link["source_record_index"], []).append(link["candle_id"])
                 store_record_manifest(
