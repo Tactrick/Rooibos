@@ -108,7 +108,12 @@ for all three data families:
 
 - `process_a6_raw_response()`: reads the immutable captured response, invokes
   an explicit provider decoder, normalises and persists A6 candles, then
-  publishes through A13.
+  publishes through A13. It currently requires exactly one captured response
+  per run and rejects multi-response runs before parsing or persistence.
+  Although the generic framework can capture multiple requests/responses,
+  A6 aggregation is deliberately not inferred: pagination, page ordering,
+  overlap/deduplication and completeness rules must be established from a
+  genuine provider contract and fixture before multi-response publication is enabled.
 - `process_a2_raw_response()`: binds decoded metric inputs to captured
   provenance, normalises and persists A2 observations, then publishes through
   A13.
