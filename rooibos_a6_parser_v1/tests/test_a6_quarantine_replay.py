@@ -17,6 +17,7 @@ class A6QuarantineAndReplayTests(A6CollectorToA13E2ETests):
             decided_at="2026-11-11T10:02:00Z",
             effective_at="2026-11-11T10:03:00Z",
             actor_id="synthetic-test", reason="A6 quarantine/replay synthetic acceptance",
+            expected_candle_count=2,
         )
         return run_id, result
 
