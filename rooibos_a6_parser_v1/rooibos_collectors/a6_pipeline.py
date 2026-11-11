@@ -210,7 +210,9 @@ def process_a6_raw_response(
                 error_summary=f"A13 decision quarantined snapshot: {decision.dataset_status}",
             )
         else:
-            framework.transition(run_id, "completed")
+            framework.complete_after_a13_publication(
+                run_id, grant=grant, records=records_a13,
+            )
         return A6PipelineResult(
             parsed, stored, candle_ids, tuple(assessments), decision, grant,
         )
