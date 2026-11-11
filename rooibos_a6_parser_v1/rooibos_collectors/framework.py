@@ -76,6 +76,8 @@ class CollectorFramework:
         policy = self._require_policy(source_id, endpoint_id)
         if not policy.validated:
             raise CollectorPolicyError("Endpoint mapping has not passed validation; collection is disabled")
+        if not policy.enabled:
+            raise CollectorPolicyError("Endpoint policy is disabled; collection is not authorised")
         conn = _connect(self.db_path)
         try:
             collector = conn.execute("SELECT is_enabled FROM collectors WHERE collector_id=?", (collector_id,)).fetchone()
