@@ -234,6 +234,80 @@ class A6StorageTests(unittest.TestCase):
         c.close()
 
 
+    def test_conflicting_candle_from_second_response_is_preserved_without_replacing_or_misattributing(self):
+        first = persist_parse_result(self.db, result=self.parse(), raw_response_id=self.raw_id)
+        self.assertEqual(first["inserted_count"], 2)
+
+        c = sqlite3.connect(self.db)
+        c.execute("""INSERT INTO collection_runs(
+            run_id,collector_id,source_id,endpoint_id,collector_version,requested_scope_json,started_at,status
+        ) VALUES ('run2','A6','moby','ohlcv','1.0.0','{}','2026-11-09T10:01:00Z','collecting')""")
+        c.commit()
+        c.close()
+
+        second_raw_id = "raw2-conflict"
+        store_raw_response(
+            self.db, raw_response_id=second_raw_id, run_id="run2", source_id="moby",
+            endpoint_id="ohlcv", payload={"synthetic_fixture": True, "variant": "conflicting"},
+            request_params={"mint":"MintABC","interval":"15m","limit":2},
+            retrieved_at="2026-11-09T10:01:01Z", http_status=200,
+        )
+        c = sqlite3.connect(self.db)
+        c.execute("UPDATE collection_runs SET status='parsed' WHERE run_id='run2'")
+        c.commit()
+        c.close()
+
+        context2 = ParseContext(
+            chain="solana", asset_id="asset1", mint_address="MintABC", interval="15m",
+            source_id="moby", endpoint_id="ohlcv", collection_run_id="run2",
+            raw_response_ref=second_raw_id, volume_unit="base_token",
+        )
+        conflicting_records = [dict(self.records[0], close=1.15, source_record_index=0),
+                               dict(self.records[1], source_record_index=1)]
+        result2 = normalise_records(conflicting_records, context2)
+        outcome = persist_parse_result(self.db, result=result2, raw_response_id=second_raw_id)
+
+        self.assertEqual(outcome["inserted_count"], 0)
+        self.assertEqual(outcome["storage_conflict_count"], 1)
+        c = sqlite3.connect(self.db)
+        c.row_factory = sqlite3.Row
+        canonical = c.execute(
+            "SELECT close,raw_response_id,source_record_index FROM ohlcv_candles WHERE open_time_ms=?",
+            (1794225600000,),
+        ).fetchone()
+        self.assertEqual((canonical["close"], canonical["raw_response_id"], canonical["source_record_index"]),
+                         (1.1, self.raw_id, 0))
+
+        # A conflicting observation remains attached to its own immutable raw
+        # response and normalization manifest, never linked as evidence for
+        # the unchanged canonical candle.
+        links = c.execute(
+            "SELECT raw_response_id,source_record_index FROM a6_candle_evidence_links "
+            "WHERE candle_id=(SELECT candle_id FROM ohlcv_candles WHERE open_time_ms=?)",
+            (1794225600000,),
+        ).fetchall()
+        self.assertEqual([(row["raw_response_id"], row["source_record_index"]) for row in links],
+                         [(self.raw_id, 0)])
+        manifest = json.loads(c.execute(
+            "SELECT details_json FROM normalization_events WHERE raw_response_id=?",
+            (second_raw_id,),
+        ).fetchone()["details_json"])
+        self.assertEqual(manifest["storage"]["storage_conflict_count"], 1)
+        conflicting_variant = next(candle for candle in manifest["candles"]
+                                   if candle["open_time_ms"] == 1794225600000)
+        self.assertEqual(conflicting_variant["close"], 1.15)
+        self.assertEqual(conflicting_variant["source_record_index"], 0)
+        self.assertEqual(
+            {record.raw_response_id for record in project_a6_from_storage(
+                c, canonical_id := c.execute(
+                    "SELECT candle_id FROM ohlcv_candles WHERE open_time_ms=?", (1794225600000,)
+                ).fetchone()["candle_id"]
+            )},
+            {self.raw_id},
+        )
+        c.close()
+
+
     def test_a6_storage_to_a13_publication_and_read_gate_uses_all_evidence(self):
         persist_parse_result(self.db, result=self.parse(), raw_response_id=self.raw_id)
         c = sqlite3.connect(self.db)
