@@ -389,6 +389,56 @@ class CollectorFrameworkTests(unittest.TestCase):
         )
         c.close()
 
+    def test_authorise_request_failures_leave_counts_and_sequences_unchanged(self):
+        self.create_run()
+        self.framework.transition('run1', 'configured')
+
+        with self.assertRaises(CollectorPolicyError):
+            self.framework.authorise_request(
+                'run1', {'mint':'MintABC', 'unapproved':'value'}
+            )
+
+        c = sqlite3.connect(self.db)
+        run = c.execute(
+            "SELECT status,request_count FROM collection_runs WHERE run_id='run1'"
+        ).fetchone()
+        requests = c.execute(
+            "SELECT COUNT(*) FROM collection_requests WHERE run_id='run1'"
+        ).fetchone()[0]
+        c.close()
+        self.assertEqual(run, ('configured', 0))
+        self.assertEqual(requests, 0)
+
+        ticket = self.framework.authorise_request('run1', {'mint':'MintABC'})
+        self.assertEqual(ticket.request_sequence, 0)
+
+    def test_concurrent_request_authorizations_allocate_unique_ordered_sequences(self):
+        from concurrent.futures import ThreadPoolExecutor
+
+        self.create_run()
+        self.framework.transition('run1', 'configured')
+
+        def authorize(_):
+            return self.framework.authorise_request('run1', {'mint':'MintABC'})
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            tickets = list(executor.map(authorize, range(8)))
+
+        sequences = sorted(ticket.request_sequence for ticket in tickets)
+        self.assertEqual(sequences, list(range(8)))
+        self.assertEqual(len({ticket.request_id for ticket in tickets}), 8)
+
+        c = sqlite3.connect(self.db)
+        run = c.execute(
+            "SELECT status,request_count FROM collection_runs WHERE run_id='run1'"
+        ).fetchone()
+        persisted = c.execute(
+            "SELECT request_sequence FROM collection_requests WHERE run_id='run1' ORDER BY request_sequence"
+        ).fetchall()
+        c.close()
+        self.assertEqual(run, ('collecting', 8))
+        self.assertEqual([row[0] for row in persisted], list(range(8)))
+
     def test_request_cannot_be_issued_before_run_is_configured(self):
         self.create_run()
         with self.assertRaises(InvalidRunTransition):
