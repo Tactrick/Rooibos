@@ -78,6 +78,27 @@ class CollectorFrameworkTests(unittest.TestCase):
         self.assertTrue(check_integrity(self.db)['ok'])
 
 
+    def test_page_sequence_requires_non_negative_integer(self):
+        self.create_run()
+        self.framework.transition('run1', 'configured')
+        ticket = self.framework.authorise_request(
+            'run1', {'mint':'MintABC','interval':'15m','limit':2}
+        )
+        for invalid in (-1, True, 1.5, '2'):
+            with self.subTest(page_sequence=invalid):
+                with self.assertRaisesRegex(ValueError, 'non-negative integer'):
+                    self.framework.capture_response(
+                        ticket, raw_response_id=f'raw-invalid-page-{str(invalid)}',
+                        payload={'synthetic':True}, page_sequence=invalid,
+                    )
+        # Invalid page metadata must not leave partial raw evidence behind.
+        c = sqlite3.connect(self.db)
+        self.assertEqual(
+            c.execute("SELECT COUNT(*) FROM raw_responses WHERE run_id='run1'").fetchone()[0],
+            0,
+        )
+        c.close()
+
     def test_exact_response_capture_retry_is_idempotent_after_run_advances(self):
         self.create_run()
         self.framework.transition('run1', 'configured')
