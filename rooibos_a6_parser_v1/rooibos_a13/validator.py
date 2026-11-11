@@ -54,12 +54,23 @@ def assess_record(record: EvidenceRecord, source_policies: Mapping[str, SourcePo
 
     p = record.payload if isinstance(record.payload, Mapping) else {}
     if record.dataset_type == "a1_discovery":
-        if not p.get("mint") or p.get("mint") != record.mint:
+        if p.get("mint") != record.mint:
             errors.append(_finding("a1_mint_mismatch", "error", "A1 payload mint must exactly match the record identity; case is significant."))
-        if p.get("chain") and p.get("chain") != record.chain:
-            errors.append(_finding("a1_chain_mismatch", "error", "A1 payload chain conflicts with record identity."))
+        if p.get("chain") != record.chain:
+            errors.append(_finding("a1_chain_mismatch", "error", "A1 payload chain must exactly match the record identity."))
+        for field in ("symbol", "name", "creator", "created_at", "first_seen_at", "launchpad", "website"):
+            if field in p and p[field] is not None and not isinstance(p[field], str):
+                errors.append(_finding("a1_invalid_" + field, "error", f"A1 {field} metadata must be text or NULL."))
+        decimals = p.get("decimals")
+        if decimals is not None and (
+            isinstance(decimals, bool) or not isinstance(decimals, int) or not 0 <= decimals <= 255
+        ):
+            errors.append(_finding("a1_invalid_decimals", "error", "A1 decimals must be an integer from 0 to 255."))
+        social_links = p.get("social_links")
+        if social_links is not None and not isinstance(social_links, Mapping):
+            errors.append(_finding("a1_invalid_social_links", "error", "A1 social_links must be an object or NULL."))
         # Metadata is optional. Missing fields are not evidence of a defect.
-        if "symbol" not in p and "name" not in p:
+        if not p.get("symbol") and not p.get("name"):
             warnings.append(_finding("a1_sparse_metadata", "warning", "Discovery has no symbol or name; token identity remains the chain and mint."))
     elif record.dataset_type == "a2_market":
         from rooibos_a2.normalizer import METRIC_UNITS
