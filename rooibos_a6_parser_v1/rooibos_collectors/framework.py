@@ -206,6 +206,11 @@ class CollectorFramework:
         """Create an auditable request ticket; this does not execute a network call."""
         conn = _connect(self.db_path)
         try:
+            # Serialize sequence allocation and run-state validation. The
+            # UNIQUE(run_id, request_sequence) constraint remains the final
+            # integrity barrier, while BEGIN IMMEDIATE avoids routine races
+            # between concurrent request authorizations for the same run.
+            conn.execute("BEGIN IMMEDIATE")
             run = conn.execute("SELECT source_id,endpoint_id,status FROM collection_runs WHERE run_id=?", (run_id,)).fetchone()
             if not run:
                 raise KeyError(f"Unknown collection run: {run_id}")
