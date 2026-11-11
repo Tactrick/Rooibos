@@ -121,7 +121,7 @@ def authorize_snapshot(conn: sqlite3.Connection, *, snapshot_id: str,
             expected_evidence_links.add((record.record_id, record.raw_response_id, index))
         try:
             persisted_evidence_links = {
-                (item["record_id"], item["raw_response_id"], item["source_record_index"])
+                (item[0], item[1], item[2])
                 for item in conn.execute(
                     "SELECT record_id, raw_response_id, source_record_index "
                     "FROM a13_snapshot_evidence_links WHERE snapshot_id=?",
