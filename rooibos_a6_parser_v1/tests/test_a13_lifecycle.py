@@ -4,7 +4,7 @@ from rooibos_db.database import initialize_database, _connect
 from rooibos_a13.models import EvidenceRecord
 from rooibos_a13.read_gate import authorize_snapshot, snapshot_content_hash, SnapshotAccessDenied
 from rooibos_a13.lifecycle import (LifecycleError, register_snapshot, supersede_snapshot,
-    withdraw_snapshot, set_legal_hold, lifecycle_state, add_retention_policy, register_snapshot_for_records,
+    withdraw_snapshot, set_legal_hold, lifecycle_state, add_retention_policy, register_snapshot_for_records, supersede_snapshot_for_records,
     assign_retention_policy, assess_retention)
 
 class A13LifecycleTests(unittest.TestCase):
@@ -121,6 +121,44 @@ class A13LifecycleTests(unittest.TestCase):
         self.assertEqual(lifecycle_state(self.conn,'snap-1').superseded_by,'snap-2')
         self.assertEqual(lifecycle_state(self.conn,'snap-2').state,'registered')
         with self.assertRaises(SnapshotAccessDenied): self._gate(snapshot='snap-1',require_lifecycle=True)
+
+    def test_supersession_registers_replacement_with_exact_record_provenance(self):
+        self._register(snapshot_id='snap-1', event_id='evt-1',
+            effective_at='2026-11-09T10:01:30Z', actor_id='g', reason='publish',
+            raw_response_ids=['raw'])
+        supersede_snapshot_for_records(self.conn, old_snapshot_id='snap-1',
+            new_snapshot_id='snap-2', old_event_id='evt-2', new_event_id='evt-3',
+            effective_at='2026-11-09T10:04:00Z', actor_id='g',
+            reason='corrected evidence', records=[self.record])
+        self.assertEqual(lifecycle_state(self.conn, 'snap-1').state, 'superseded')
+        self.assertEqual(lifecycle_state(self.conn, 'snap-2').state, 'registered')
+        links = self.conn.execute(
+            "SELECT record_id, raw_response_id, source_record_index "
+            "FROM a13_snapshot_evidence_links WHERE snapshot_id='snap-2'"
+        ).fetchall()
+        self.assertEqual([tuple(row) for row in links], [('rec-1', 'raw', 0)])
+        self.assertEqual(self._gate(snapshot='snap-2', require_lifecycle=True).snapshot_id, 'snap-2')
+        with self.assertRaises(SnapshotAccessDenied):
+            self._gate(snapshot='snap-1', require_lifecycle=True)
+
+    def test_failed_replacement_provenance_rolls_back_supersession(self):
+        from dataclasses import replace
+        self._register(snapshot_id='snap-1', event_id='evt-1',
+            effective_at='2026-11-09T10:01:30Z', actor_id='g', reason='publish',
+            raw_response_ids=['raw'])
+        altered = replace(self.record, source_record_index=9)
+        with self.assertRaises(LifecycleError):
+            supersede_snapshot_for_records(self.conn, old_snapshot_id='snap-1',
+                new_snapshot_id='snap-2', old_event_id='evt-2', new_event_id='evt-3',
+                effective_at='2026-11-09T10:04:00Z', actor_id='g',
+                reason='bad replacement', records=[altered])
+        self.assertEqual(lifecycle_state(self.conn, 'snap-1').state, 'registered')
+        self.assertEqual(self.conn.execute(
+            "SELECT COUNT(*) FROM a13_snapshot_lifecycle_events WHERE snapshot_id='snap-2'"
+        ).fetchone()[0], 0)
+        self.assertEqual(self.conn.execute(
+            "SELECT COUNT(*) FROM a13_snapshot_evidence_links WHERE snapshot_id='snap-2'"
+        ).fetchone()[0], 0)
 
     def test_retention_expiry_denies_use_but_does_not_delete(self):
         self._register(snapshot_id='snap-1',event_id='evt-1',effective_at='2026-11-09T10:01:30Z',actor_id='g',reason='publish',raw_response_ids=['raw'])
