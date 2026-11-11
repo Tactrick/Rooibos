@@ -128,6 +128,41 @@ class A6QuarantineAndReplayTests(A6CollectorToA13E2ETests):
             conn.close()
 
 
+
+    def test_multiple_captured_responses_in_one_run_are_rejected_before_parsing(self):
+        run_id, payload = self._capture("raw-a6-multi-1")
+        second_ticket = self.framework.authorise_request(run_id, {"mint": MINT, "interval": "15m"})
+        self.framework.capture_response(
+            second_ticket, raw_response_id="raw-a6-multi-2", payload=payload,
+            http_status=200, retrieved_at="2026-11-11T10:00:02Z", page_sequence=1,
+        )
+        with self.assertRaisesRegex(ValueError, "multi-response aggregation is not implemented"):
+            process_a6_raw_response(
+                self.framework, run_id=run_id, raw_response_id="raw-a6-multi-1",
+                parse_context=self._context(run_id, "raw-a6-multi-1"),
+                request_identity_fields={"mint_address": "mint", "interval": "interval"},
+                response_identity_fields={"mint_address": ("mint",)},
+                decode_payload=self._decode, snapshot_id="snap-a6-multi",
+                source_policies=POLICIES,
+                assessed_at="2026-11-11T10:01:00Z",
+                decided_at="2026-11-11T10:02:00Z",
+                effective_at="2026-11-11T10:03:00Z",
+                actor_id="synthetic-test", reason="multi-response fail-closed regression",
+            )
+        conn = _connect(self.db)
+        try:
+            self.assertEqual(conn.execute(
+                "SELECT COUNT(*) FROM raw_responses WHERE run_id=?", (run_id,)
+            ).fetchone()[0], 2)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM ohlcv_candles").fetchone()[0], 0)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM a13_snapshot_decisions").fetchone()[0], 0)
+            self.assertEqual(conn.execute(
+                "SELECT status FROM collection_runs WHERE run_id=?", (run_id,)
+            ).fetchone()[0], "raw_captured")
+        finally:
+            conn.close()
+
+
 # Reuse the fixture policy declared by the end-to-end acceptance suite.
 from test_a6_pipeline_e2e import POLICIES
 from rooibos_db.database import _connect
