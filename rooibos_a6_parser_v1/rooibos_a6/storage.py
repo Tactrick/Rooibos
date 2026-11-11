@@ -36,6 +36,10 @@ def store_raw_response(
     content_type: str | None = "application/json", page_sequence: int | None = None,
 ) -> str:
     """Persist raw JSON before parsing. Existing raw IDs are never overwritten."""
+    if page_sequence is not None and (
+        isinstance(page_sequence, bool) or not isinstance(page_sequence, int) or page_sequence < 0
+    ):
+        raise ValueError("page_sequence must be a non-negative integer when supplied")
     initialize_database(db_path)
     payload_json = _json(payload)
     payload_hash = _sha256(payload_json)
