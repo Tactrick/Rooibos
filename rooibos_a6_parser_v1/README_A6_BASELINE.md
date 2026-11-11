@@ -164,3 +164,20 @@ response IDs, now fails closed because it cannot prove record-level
 provenance. Read authorization continues to require the exact per-record
 links, regardless of whether lifecycle checks are otherwise requested.
 
+
+
+## A6 publication completeness gate
+
+The raw-response pipeline now applies `assess_completeness()` before A13
+publication. Its default requirement is **100 consecutive closed 15-minute
+candles**. Forming and unconfirmed candles do not count toward the threshold
+and cannot bridge a gap between confirmed closed candles. A history that
+misses the threshold, contains a closed-candle gap, or otherwise fails the
+parser's completeness checks is quarantined before A13 publication.
+
+The `expected_candle_count` parameter exists for controlled tests and
+explicitly scoped validation runs; production operation should retain the
+default of 100 unless a separately reviewed data requirement justifies a
+different threshold. This gate is a completeness check, not proof that the
+provider's volume unit, response mapping, candle closure semantics or market
+identity are correct. Those still require genuine first-party Moby evidence.
