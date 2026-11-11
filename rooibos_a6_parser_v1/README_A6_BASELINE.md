@@ -123,3 +123,20 @@ The response identity path is caller-supplied; no provider aliases or envelope p
 The Moby parallel-array adapter now emits both `source_record_index` (the zero-based position in the original captured provider arrays) and `source_record_count` (the original array length) on every decoded row. It does not sort, filter, or collapse rows. The generic A6 normalizer honours an explicit source index when supplied, so rejected records retain their original index in findings and valid candles retain their original index after chronological sorting or duplicate handling. Duplicate explicit indices are structural errors.
 
 The A6 raw-response pipeline requires decoded rows to carry a complete one-to-one index set for the declared original source count. Missing, repeated, altered, or filtered source records therefore fail closed before persistence/publication rather than silently shifting provenance. This requirement applies to pipeline decoders; direct provider-neutral parser use may still omit explicit indices and receive positional indices for synthetic/local workflows. Tests use synthetic payloads only. A genuine Moby response fixture remains outstanding.
+
+
+## A13 exact source-coordinate publication links (migration 010)
+
+A13 now stores an append-only per-record evidence-link row containing
+`snapshot_id`, `record_id`, `raw_response_id`, and the original
+`source_record_index`. The existing snapshot-to-raw-response links remain
+for lifecycle and retention operations; they are not treated as sufficient
+proof of record-level provenance.
+
+Publication writes lifecycle registration, snapshot raw-response links, and
+per-record source-coordinate links within one transaction boundary. The
+read gate compares the complete persisted per-record relationship set against
+the approved evidence records and denies access on any missing, extra, or
+altered relationship. The source index is also bound into the approved
+snapshot content hash. Migration 010 is additive; earlier migrations remain
+immutable. Tests use synthetic local records only.
