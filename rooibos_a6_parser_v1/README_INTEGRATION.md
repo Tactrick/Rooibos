@@ -116,7 +116,9 @@ assessment, decision, raw-evidence links, lifecycle registration and final
 read-gate verification. The lifecycle registrar and read gate independently
 bind each evidence record's run/source/endpoint identity to both the immutable
 raw-response row and its owning collection-run metadata, in addition to
-checking exact raw-response/source-index links.
+checking exact raw-response/source-index links. The consumer read gate also
+recomputes each supplied payload hash so a mutable payload cannot be substituted
+while reusing an approved record's content hash.
 A quarantined decision remains auditable but is not registered or exposed to
 consumers. Parser/normalizer errors and provenance mismatches fail the run closed.
 
