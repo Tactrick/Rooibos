@@ -49,6 +49,8 @@ def persist_a2_result(db_path: str | Path, *, result: A2Result) -> dict:
                     raise ValueError("Observation ID collision with different content or provenance")
                 replayed += 1
                 continue
+            if run["status"] == "validating":
+                raise ValueError("A2 cannot append new observations after validation has begun")
             conn.execute("""INSERT INTO market_observations(
                 observation_id,chain,mint_address,market_id,pool_address,market_scope,metric_code,
                 numeric_value,text_value,value_status,unit,quote_currency,window_seconds,measurement_kind,
