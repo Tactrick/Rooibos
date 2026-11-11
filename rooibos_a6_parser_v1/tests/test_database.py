@@ -4,7 +4,9 @@ import unittest
 from pathlib import Path
 
 from rooibos_db.database import (
-    MIGRATION_001_SQL, apply_migrations, backup_database, check_integrity,
+    MIGRATION_001_SQL, MIGRATION_002_SQL, MIGRATION_003_SQL, MIGRATION_004_SQL,
+    MIGRATION_005_SQL, MIGRATION_006_SQL, MIGRATION_007_SQL, MIGRATION_008_SQL,
+    apply_migrations, backup_database, check_integrity,
     initialize_database, restore_database, _connect
 )
 
@@ -35,6 +37,73 @@ class Migration001Tests(unittest.TestCase):
             for required in ("sources", "collectors", "collection_runs", "raw_responses",
                              "ohlcv_candles", "a6_candle_evidence_links", "a13_snapshot_evidence_links", "validation_runs", "research_snapshots", "market_observations", "market_observation_comparisons"):
                 self.assertIn(required, tables)
+        finally:
+            conn.close()
+
+    def test_migration_009_backfills_existing_candle_raw_evidence(self):
+        conn = _connect(self.db)
+        try:
+            legacy_migrations = [
+                (1, "Initial shared collector schema", MIGRATION_001_SQL),
+                (2, "Enforce OHLCV uniqueness when market is unknown", MIGRATION_002_SQL),
+                (3, "Add canonical A6 OHLCV metadata", MIGRATION_003_SQL),
+                (4, "Add append-only A2 market observations", MIGRATION_004_SQL),
+                (5, "Add append-only A1 token discovery observations", MIGRATION_005_SQL),
+                (6, "Add append-only A13 quality assessments and snapshot decisions", MIGRATION_006_SQL),
+                (7, "Bind A13 decisions to exact snapshot content hashes", MIGRATION_007_SQL),
+                (8, "Add append-only A13 snapshot lifecycle and retention governance", MIGRATION_008_SQL),
+            ]
+            apply_migrations(conn, legacy_migrations)
+            conn.execute(
+                "INSERT INTO sources(source_id,source_name,source_type) VALUES ('legacy-source','Legacy','api')"
+            )
+            conn.execute(
+                "INSERT INTO source_endpoints(endpoint_id,source_id,endpoint_name,method,path) "
+                "VALUES ('legacy-endpoint','legacy-source','ohlcv','GET','/ohlcv')"
+            )
+            conn.execute(
+                "INSERT INTO collectors(collector_id,collector_name,module_code,version) "
+                "VALUES ('legacy-collector','Legacy A6','A6','1')"
+            )
+            conn.execute(
+                "INSERT INTO collection_runs(run_id,collector_id,source_id,endpoint_id,collector_version,"
+                "requested_scope_json,started_at,status) VALUES "
+                "('legacy-run','legacy-collector','legacy-source','legacy-endpoint','1','{}',"
+                "'2026-11-09T00:00:00Z','completed')"
+            )
+            conn.execute(
+                "INSERT INTO assets(asset_id,chain,token_address,symbol) "
+                "VALUES ('legacy-asset','solana','LegacyMint','LEG')"
+            )
+            conn.execute(
+                "INSERT INTO raw_responses(raw_response_id,run_id,source_id,endpoint_id,retrieved_at,"
+                "request_params_json,payload_json,payload_sha256) VALUES "
+                "('legacy-raw','legacy-run','legacy-source','legacy-endpoint',"
+                "'2026-11-09T00:00:00Z','{}','{}','legacy-hash')"
+            )
+            conn.execute(
+                "INSERT INTO ohlcv_candles(candle_id,asset_id,market_id,interval,open_time_ms,source_id,"
+                "normalization_version,open,high,low,close,volume,raw_response_id,run_id,"
+                "source_record_index,endpoint_id) VALUES "
+                "('legacy-candle','legacy-asset',NULL,'15m',1794000000000,'legacy-source',"
+                "'norm-v1',1.0,2.0,0.5,1.5,100.0,'legacy-raw','legacy-run',3,'legacy-endpoint')"
+            )
+            conn.close()
+            initialize_database(self.db)
+            conn = _connect(self.db)
+            links = conn.execute(
+                "SELECT candle_id,raw_response_id,run_id,source_id,endpoint_id,source_record_index "
+                "FROM a6_candle_evidence_links"
+            ).fetchall()
+            self.assertEqual(
+                [tuple(row) for row in links],
+                [("legacy-candle","legacy-raw","legacy-run","legacy-source","legacy-endpoint",3)],
+            )
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM ohlcv_candles WHERE candle_id='legacy-candle'").fetchone()[0],
+                1,
+            )
+            self.assertEqual(check_integrity(self.db)["ok"], True)
         finally:
             conn.close()
 
