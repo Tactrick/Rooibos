@@ -116,7 +116,7 @@ class Migration001Tests(unittest.TestCase):
         try:
             self.assertEqual(conn.execute(
                 "SELECT COUNT(*) FROM schema_migrations"
-            ).fetchone()[0], 10)
+            ).fetchone()[0], 11)
         finally:
             conn.close()
 
