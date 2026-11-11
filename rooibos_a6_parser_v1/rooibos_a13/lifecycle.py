@@ -225,27 +225,16 @@ def register_snapshot_for_records(conn: sqlite3.Connection, *, snapshot_id: str,
 def supersede_snapshot(conn: sqlite3.Connection, *, old_snapshot_id: str, new_snapshot_id: str,
                        old_event_id: str, new_event_id: str, effective_at: str,
                        actor_id: str, reason: str, new_raw_response_ids: Iterable[str]) -> None:
-    new_raw_ids = sorted(set(new_raw_response_ids))
-    if not new_raw_ids: raise LifecycleError("replacement snapshot requires linked raw responses")
-    old = conn.execute("SELECT dataset_type,dataset_status FROM a13_snapshot_decisions WHERE snapshot_id=?",(old_snapshot_id,)).fetchone()
-    new = conn.execute("SELECT dataset_type,dataset_status FROM a13_snapshot_decisions WHERE snapshot_id=?",(new_snapshot_id,)).fetchone()
-    if not old or not new: raise LifecycleError("both old and replacement decisions must exist")
-    if old[0] != new[0] or new[1] not in ("approved_for_research","approved_with_warnings"):
-        raise LifecycleError("replacement must be approved and have the same dataset type")
-    conn.execute("BEGIN IMMEDIATE")
-    try:
-        _append_event(conn,event_id=old_event_id,snapshot_id=old_snapshot_id,event_type="superseded",effective_at=effective_at,
-                      actor_id=actor_id,reason=reason,related_snapshot_id=new_snapshot_id)
-        _append_event(conn,event_id=new_event_id,snapshot_id=new_snapshot_id,event_type="registered",effective_at=effective_at,
-                      actor_id=actor_id,reason=f"Replacement for {old_snapshot_id}: {reason}",related_snapshot_id=old_snapshot_id)
-        for raw_id in new_raw_ids:
-            if conn.execute("SELECT 1 FROM raw_responses WHERE raw_response_id=?",(raw_id,)).fetchone() is None:
-                raise LifecycleError(f"raw response {raw_id!r} does not exist")
-            conn.execute("INSERT INTO a13_snapshot_raw_links VALUES (?,?,?)",(new_snapshot_id,raw_id,effective_at))
-        conn.commit()
-    except Exception:
-        conn.rollback(); raise
+    """Reject legacy raw-only supersession.
 
+    A list of raw response IDs cannot prove which original source record
+    produced each replacement record. Use supersede_snapshot_for_records()
+    so the replacement lifecycle event and exact provenance links are atomic.
+    """
+    raise LifecycleError(
+        "raw-response-only supersession is not publication-safe; "
+        "use supersede_snapshot_for_records with approved evidence records"
+    )
 
 def withdraw_snapshot(conn: sqlite3.Connection, *, snapshot_id: str, event_id: str,
                       effective_at: str, actor_id: str, reason: str) -> None:
