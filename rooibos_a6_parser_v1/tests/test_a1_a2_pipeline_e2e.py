@@ -294,5 +294,36 @@ class A1A2CollectorToA13E2ETests(unittest.TestCase):
         finally:
             conn.close()
 
+    def test_a2_invalid_a13_assessment_is_quarantined_without_partial_publication(self):
+        raw_id = "raw-a2-unapproved-source"
+        run_id = self._capture("A2", {"records":[{"liquidity":1234.5}]}, raw_id)
+
+        def decode(payload, provenance):
+            return [MarketObservationInput(
+                chain="solana", mint_address=MINT, observed_at=provenance.retrieved_at,
+                source_id=provenance.source_id, endpoint_id=provenance.endpoint_id,
+                run_id=provenance.run_id, raw_response_id=provenance.raw_response_id,
+                source_record_index=0,
+                metrics=(MarketMetricInput("liquidity", payload["records"][0]["liquidity"]),),
+                market_scope="token_aggregated", source_record_count=1,
+            )]
+
+        result = process_a2_raw_response(
+            self.framework, run_id=run_id, raw_response_id=raw_id,
+            decode_payload=decode, snapshot_id="snap-a2-unapproved-source",
+            source_policies={}, **self._times(),
+        )
+        self.assertFalse(result.published)
+        self.assertEqual(result.decision.dataset_status, "quarantined")
+        conn = _connect(self.db)
+        try:
+            self.assertEqual(conn.execute("SELECT status FROM collection_runs WHERE run_id=?", (run_id,)).fetchone()[0], "quarantined")
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM a13_snapshot_decisions WHERE snapshot_id='snap-a2-unapproved-source'").fetchone()[0], 1)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM a13_snapshot_lifecycle_events WHERE snapshot_id='snap-a2-unapproved-source'").fetchone()[0], 0)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM a13_snapshot_raw_links WHERE snapshot_id='snap-a2-unapproved-source'").fetchone()[0], 0)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM a13_snapshot_evidence_links WHERE snapshot_id='snap-a2-unapproved-source'").fetchone()[0], 0)
+        finally:
+            conn.close()
+
 if __name__ == "__main__":
     unittest.main()
