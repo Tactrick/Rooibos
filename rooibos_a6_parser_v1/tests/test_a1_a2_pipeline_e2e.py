@@ -72,6 +72,53 @@ class A1A2CollectorToA13E2ETests(unittest.TestCase):
             actor_id="synthetic-test", reason="end-to-end synthetic acceptance",
         )
 
+    def _capture_second_response(self, module, run_id, raw_id, payload):
+        ticket = self.framework.authorise_request(run_id, {"scope": module})
+        self.framework.capture_response(
+            ticket, raw_response_id=raw_id, payload=payload, http_status=200,
+            retrieved_at="2026-11-11T10:00:02Z", page_sequence=1,
+        )
+
+    def test_a1_multiple_responses_are_rejected_before_decode_or_persistence(self):
+        raw_id = "raw-a1-multi-first"
+        run_id = self._capture("A1", {"records":[{"symbol":"FIRST"}]}, raw_id)
+        self._capture_second_response("A1", run_id, "raw-a1-multi-second",
+                                      {"records":[{"symbol":"SECOND"}]})
+        with self.assertRaisesRegex(ValueError, "A1 single-response pipeline"):
+            process_a1_raw_response(
+                self.framework, run_id=run_id, raw_response_id=raw_id,
+                decode_payload=lambda *_: self.fail("decoder must not run"),
+                snapshot_id="snap-a1-multi", source_policies=POLICIES, **self._times(),
+            )
+        conn = _connect(self.db)
+        try:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM raw_responses WHERE run_id=?", (run_id,)).fetchone()[0], 2)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM token_discovery_observations WHERE run_id=?", (run_id,)).fetchone()[0], 0)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM a13_snapshot_decisions WHERE snapshot_id='snap-a1-multi'").fetchone()[0], 0)
+            self.assertEqual(conn.execute("SELECT status FROM collection_runs WHERE run_id=?", (run_id,)).fetchone()[0], "raw_captured")
+        finally:
+            conn.close()
+
+    def test_a2_multiple_responses_are_rejected_before_decode_or_persistence(self):
+        raw_id = "raw-a2-multi-first"
+        run_id = self._capture("A2", {"records":[{"liquidity":1}]}, raw_id)
+        self._capture_second_response("A2", run_id, "raw-a2-multi-second",
+                                      {"records":[{"liquidity":2}]})
+        with self.assertRaisesRegex(ValueError, "A2 single-response pipeline"):
+            process_a2_raw_response(
+                self.framework, run_id=run_id, raw_response_id=raw_id,
+                decode_payload=lambda *_: self.fail("decoder must not run"),
+                snapshot_id="snap-a2-multi", source_policies=POLICIES, **self._times(),
+            )
+        conn = _connect(self.db)
+        try:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM raw_responses WHERE run_id=?", (run_id,)).fetchone()[0], 2)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM market_observations WHERE run_id=?", (run_id,)).fetchone()[0], 0)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM a13_snapshot_decisions WHERE snapshot_id='snap-a2-multi'").fetchone()[0], 0)
+            self.assertEqual(conn.execute("SELECT status FROM collection_runs WHERE run_id=?", (run_id,)).fetchone()[0], "raw_captured")
+        finally:
+            conn.close()
+
     def test_a1_capture_decode_persist_assess_publish_and_authorize(self):
         raw_id = "raw-a1-e2e"
         run_id = self._capture("A1", {"records":[{"symbol":"TEST","name":"Test Token"}]}, raw_id)
