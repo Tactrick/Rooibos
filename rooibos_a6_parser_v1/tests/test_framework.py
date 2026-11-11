@@ -78,6 +78,34 @@ class CollectorFrameworkTests(unittest.TestCase):
         self.assertTrue(check_integrity(self.db)['ok'])
 
 
+    def test_exact_response_capture_retry_is_idempotent_after_run_advances(self):
+        self.create_run()
+        self.framework.transition('run1', 'configured')
+        ticket = self.framework.authorise_request(
+            'run1', {'mint':'MintABC','interval':'15m','limit':2}
+        )
+        capture = dict(
+            raw_response_id='raw-idempotent-retry',
+            payload={'synthetic':True}, http_status=200,
+            retrieved_at='2026-11-11T09:00:00Z', page_sequence=0,
+        )
+        first_hash = self.framework.capture_response(ticket, **capture)
+        self.framework.transition('run1', 'parsed')
+        second_hash = self.framework.capture_response(ticket, **capture)
+        self.assertEqual(first_hash, second_hash)
+        c = sqlite3.connect(self.db)
+        run = c.execute(
+            'SELECT status,response_count FROM collection_runs WHERE run_id=?',
+            ('run1',),
+        ).fetchone()
+        raw_count = c.execute(
+            'SELECT COUNT(*) FROM raw_responses WHERE raw_response_id=?',
+            ('raw-idempotent-retry',),
+        ).fetchone()[0]
+        c.close()
+        self.assertEqual(run, ('parsed', 1))
+        self.assertEqual(raw_count, 1)
+
     def test_response_capture_does_not_resurrect_run_cancelled_during_persistence(self):
         self.create_run()
         self.framework.transition('run1', 'configured')
