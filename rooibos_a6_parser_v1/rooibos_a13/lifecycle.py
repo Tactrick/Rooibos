@@ -193,9 +193,21 @@ def register_snapshot_for_records(conn: sqlite3.Connection, *, snapshot_id: str,
     raw_ids = {record.raw_response_id for record in records}
     if None in raw_ids or "" in raw_ids:
         raise LifecycleError("every approved record must reference a raw response")
+    for record in records:
+        index = record.source_record_index
+        if isinstance(index, bool) or not isinstance(index, int) or index < 0:
+            raise LifecycleError("every approved record must reference a valid original source-record index")
     register_snapshot(conn, snapshot_id=snapshot_id, event_id=event_id, effective_at=effective_at,
                       actor_id=actor_id, reason=reason, raw_response_ids=raw_ids,
                       commit=commit)
+    for record in records:
+        conn.execute(
+            "INSERT INTO a13_snapshot_evidence_links "
+            "(snapshot_id, record_id, raw_response_id, source_record_index, linked_at) "
+            "VALUES (?,?,?,?,?)",
+            (snapshot_id, record.record_id, record.raw_response_id,
+             record.source_record_index, effective_at),
+        )
 
 
 def supersede_snapshot(conn: sqlite3.Connection, *, old_snapshot_id: str, new_snapshot_id: str,
