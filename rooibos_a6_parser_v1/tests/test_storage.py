@@ -375,5 +375,33 @@ class A6StorageTests(unittest.TestCase):
             self.assertEqual(count, 0, f"{table} retained partial publication rows")
         c.close()
 
+    def test_duplicate_source_record_index_rejected_before_any_write(self):
+        records = [
+            dict(self.records[0], source_record_index=0),
+            dict(self.records[1], source_record_index=0),
+        ]
+        result = self.parse(records)
+        with self.assertRaisesRegex(ValueError, "must be unique"):
+            persist_parse_result(self.db, result=result, raw_response_id=self.raw_id)
+        c = sqlite3.connect(self.db)
+        self.assertEqual(c.execute("SELECT COUNT(*) FROM ohlcv_candles").fetchone()[0], 0)
+        self.assertEqual(c.execute("SELECT COUNT(*) FROM a6_candle_evidence_links").fetchone()[0], 0)
+        self.assertEqual(c.execute("SELECT COUNT(*) FROM normalization_events").fetchone()[0], 0)
+        c.close()
+
+    def test_asset_identity_is_checked_on_identical_candle_replay(self):
+        persist_parse_result(self.db, result=self.parse(), raw_response_id=self.raw_id)
+        wrong_context = ParseContext(
+            chain="solana", asset_id="wrong-asset-id", mint_address="MintABC", interval="15m",
+            source_id="moby", endpoint_id="ohlcv", collection_run_id="run1",
+            raw_response_ref=self.raw_id, volume_unit="base_token",
+        )
+        wrong_result = normalise_records(self.records, wrong_context)
+        with self.assertRaisesRegex(ValueError, "asset_id does not match"):
+            persist_parse_result(self.db, result=wrong_result, raw_response_id=self.raw_id)
+        c = sqlite3.connect(self.db)
+        self.assertEqual(c.execute("SELECT COUNT(*) FROM a6_candle_evidence_links").fetchone()[0], 2)
+        c.close()
+
 if __name__ == '__main__':
     unittest.main()
