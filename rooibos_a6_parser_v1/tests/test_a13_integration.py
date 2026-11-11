@@ -28,11 +28,11 @@ class A13PipelineIntegrationTests(unittest.TestCase):
 
     def test_migration_chain_001_to_009_and_legacy_schema(self):
         versions = [r[0] for r in self.conn.execute("SELECT version FROM schema_migrations ORDER BY version")]
-        self.assertEqual(versions, [1,2,3,4,5,6,7,8,9])
-        self.assertEqual(MIGRATION_VERSION, 9)
+        self.assertEqual(versions, [1,2,3,4,5,6,7,8,9,10])
+        self.assertEqual(MIGRATION_VERSION, 10)
         tables = {r[0] for r in self.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         self.assertTrue({"ohlcv_candles", "a6_candle_evidence_links", "market_observations", "token_discovery_observations",
-                         "a13_record_assessments", "a13_snapshot_decisions", "a13_snapshot_lifecycle_events", "a13_retention_policies"}.issubset(tables))
+                         "a13_record_assessments", "a13_snapshot_decisions", "a13_snapshot_lifecycle_events", "a13_snapshot_evidence_links", "a13_retention_policies"}.issubset(tables))
         self.assertIn("snapshot_content_hash", {r[1] for r in self.conn.execute("PRAGMA table_info(a13_snapshot_decisions)")})
 
     def test_a1_projection_and_snapshot_gate(self):
@@ -54,6 +54,55 @@ class A13PipelineIntegrationTests(unittest.TestCase):
             expected_assessments_hash=decision.assessments_hash,
             allowed_policy_versions={decision.policy_version}, now="2026-11-09T10:03:00Z")
         self.assertEqual(grant.record_ids, (record.record_id,))
+
+
+    def test_a13_read_gate_requires_exact_record_raw_response_and_source_index_links(self):
+        self.conn.execute("INSERT INTO sources(source_id,source_name,source_type) VALUES ('fixture_source','Fixture','api')")
+        self.conn.execute("INSERT INTO collectors(collector_id,collector_name,module_code,version) VALUES ('fixture-collector','Fixture','A1','1')")
+        self.conn.execute("""INSERT INTO collection_runs(run_id,collector_id,source_id,collector_version,requested_scope_json,started_at,status)
+            VALUES ('run-coordinate','fixture-collector','fixture_source','1','{}','2026-11-09T10:00:00Z','completed')""")
+        self.conn.execute("""INSERT INTO raw_responses(raw_response_id,run_id,source_id,retrieved_at,request_params_json,payload_json,payload_sha256)
+            VALUES ('raw-coordinate','run-coordinate','fixture_source','2026-11-09T10:00:00Z','{}','{}','fixture-hash')""")
+        ctx = DiscoveryContext("solana", MINT, "fixture_source", "fixture_endpoint",
+                               "run-coordinate", "raw-coordinate", 4, "2026-11-09T10:00:00Z")
+        record = project_a1(normalize_a1(ctx, {"symbol":"SOL"}, field_map={"symbol":"symbol"}))
+        _, decision = assess_and_store_snapshot(self.conn, [record], snapshot_id="snap-coordinate-links",
+            source_policies=POLICIES, assessed_at="2026-11-09T10:01:00Z",
+            decided_at="2026-11-09T10:02:00Z")
+        from rooibos_a13.lifecycle import register_snapshot_for_records
+        register_snapshot_for_records(self.conn, snapshot_id="snap-coordinate-links",
+            event_id="snap-coordinate-links:registered", effective_at="2026-11-09T10:02:30Z",
+            actor_id="test-governance", reason="register exact source-coordinate links", records=[record])
+        links = self.conn.execute(
+            "SELECT record_id,raw_response_id,source_record_index FROM a13_snapshot_evidence_links "
+            "WHERE snapshot_id=?", ("snap-coordinate-links",)).fetchall()
+        self.assertEqual([tuple(row) for row in links],
+                         [(record.record_id, "raw-coordinate", 4)])
+        kwargs = dict(snapshot_id="snap-coordinate-links", records=[record],
+            expected_snapshot_hash=snapshot_content_hash([record]),
+            expected_assessments_hash=decision.assessments_hash,
+            allowed_policy_versions={decision.policy_version}, now="2026-11-09T10:03:00Z")
+        self.assertEqual(authorize_snapshot(self.conn, **kwargs).record_ids, (record.record_id,))
+
+        # An extra raw-coordinate mapping must deny access even when the
+        # snapshot-level set of raw response IDs remains unchanged.
+        self.conn.execute(
+            "INSERT INTO a13_snapshot_evidence_links "
+            "(snapshot_id,record_id,raw_response_id,source_record_index,linked_at) "
+            "VALUES (?,?,?,?,?)",
+            ("snap-coordinate-links", "unexpected-record", "raw-coordinate", 99,
+             "2026-11-09T10:02:30Z"))
+        with self.assertRaisesRegex(SnapshotAccessDenied, "record-to-raw-response/source-index"):
+            authorize_snapshot(self.conn, **kwargs)
+
+        # Simulate corruption/missing evidence in an isolated test database:
+        # remove the append-only guard, then prove the read gate fails closed.
+        self.conn.execute("DROP TRIGGER trg_a13_evidence_links_no_delete")
+        self.conn.execute(
+            "DELETE FROM a13_snapshot_evidence_links WHERE snapshot_id=? AND record_id=?",
+            ("snap-coordinate-links", record.record_id))
+        with self.assertRaisesRegex(SnapshotAccessDenied, "record-to-raw-response/source-index"):
+            authorize_snapshot(self.conn, **kwargs)
 
     def test_a1_storage_requires_matching_raw_response_provenance_and_exact_replay(self):
         self.conn.execute("INSERT INTO sources(source_id,source_name,source_type) VALUES ('fixture_source','Fixture','api')")
