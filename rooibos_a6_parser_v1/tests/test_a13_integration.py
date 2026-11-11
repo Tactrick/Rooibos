@@ -217,6 +217,74 @@ class A13PipelineIntegrationTests(unittest.TestCase):
         self.assertEqual(decision.dataset_status, "quarantined")
         self.assertIn("snapshot_incomplete", {finding.code for finding in decision.findings})
 
+    def test_full_a13_publication_rolls_back_if_final_read_gate_fails(self):
+        from unittest.mock import patch
+        from rooibos_integrations.a13_projection import publish_evidence_snapshot
+
+        self.conn.execute(
+            "INSERT INTO sources(source_id,source_name,source_type) VALUES ('fixture_source','Fixture','api')"
+        )
+        self.conn.execute(
+            "INSERT INTO source_endpoints(endpoint_id,source_id,endpoint_name,method,path) "
+            "VALUES ('fixture_endpoint','fixture_source','fixture_endpoint','GET','/fixture')"
+        )
+        self.conn.execute(
+            "INSERT INTO collectors(collector_id,collector_name,module_code,version) "
+            "VALUES ('fixture-collector','Fixture','A1','1')"
+        )
+        self.conn.execute(
+            "INSERT INTO collection_runs(run_id,collector_id,source_id,endpoint_id,collector_version,"
+            "requested_scope_json,started_at,status) VALUES "
+            "('run-atomic-publication','fixture-collector','fixture_source','fixture_endpoint',"
+            "'1','{}','2026-11-09T10:00:00Z','completed')"
+        )
+        self.conn.execute(
+            "INSERT INTO raw_responses(raw_response_id,run_id,source_id,endpoint_id,retrieved_at,"
+            "request_params_json,payload_json,payload_sha256) VALUES "
+            "('raw-atomic-publication','run-atomic-publication','fixture_source','fixture_endpoint',"
+            "'2026-11-09T10:00:00Z','{}','{}','fixture-hash')"
+        )
+        context = DiscoveryContext(
+            "solana", MINT, "fixture_source", "fixture_endpoint",
+            "run-atomic-publication", "raw-atomic-publication", 0,
+            "2026-11-09T10:00:00Z",
+        )
+        record = project_a1(normalize_a1(
+            context, {"symbol": "SOL"}, field_map={"symbol": "symbol"}
+        ))
+
+        # Fail only after assessments, decision, lifecycle registration and
+        # record/raw-coordinate links have been staged inside the publication
+        # savepoint. The entire publication unit must disappear.
+        with patch(
+            "rooibos_a13.read_gate.authorize_snapshot",
+            side_effect=SnapshotAccessDenied("injected final-gate failure"),
+        ):
+            with self.assertRaisesRegex(SnapshotAccessDenied, "injected final-gate failure"):
+                publish_evidence_snapshot(
+                    self.conn, [record], snapshot_id="snap-atomic-publication",
+                    source_policies=POLICIES,
+                    assessed_at="2026-11-09T10:01:00Z",
+                    decided_at="2026-11-09T10:02:00Z",
+                    effective_at="2026-11-09T10:02:30Z",
+                    actor_id="test-governance", reason="test atomic publication",
+                )
+
+        for table in (
+            "a13_record_assessments", "a13_snapshot_decisions",
+            "a13_snapshot_lifecycle_events", "a13_snapshot_evidence_links",
+            "a13_snapshot_raw_links",
+        ):
+            self.assertEqual(
+                self.conn.execute(
+                    f"SELECT COUNT(*) FROM {table} WHERE " +
+                    ("snapshot_id=?" if table != "a13_record_assessments" else "1=1"),
+                    ("snap-atomic-publication",) if table != "a13_record_assessments" else (),
+                ).fetchone()[0],
+                0,
+                table,
+            )
+
     def test_a13_assessments_and_decision_roll_back_as_one_unit(self):
         ctx = DiscoveryContext("solana", MINT, "fixture_source", "fixture_endpoint",
             "run-atomic", "raw-atomic", 7, "2026-11-09T10:00:00Z")
