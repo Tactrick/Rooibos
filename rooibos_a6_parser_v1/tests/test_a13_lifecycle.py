@@ -87,6 +87,40 @@ class A13LifecycleTests(unittest.TestCase):
         self.assertEqual(self.conn.execute(
             "SELECT COUNT(*) FROM a13_snapshot_lifecycle_events WHERE snapshot_id='snap-1'").fetchone()[0], 0)
 
+    def test_read_gate_rejects_raw_response_from_a_different_run(self):
+        from dataclasses import replace
+        foreign_record = replace(self.record, raw_response_id='raw-foreign')
+        self.conn.execute(
+            "INSERT INTO collection_runs(run_id,collector_id,source_id,collector_version,requested_scope_json,started_at,status) "
+            "VALUES ('foreign-run','collector','fixture','1','{}','2026-11-09T09:30:00Z','completed')"
+        )
+        self.conn.execute(
+            "INSERT INTO raw_responses(raw_response_id,run_id,source_id,endpoint_id,retrieved_at,request_params_json,payload_json,payload_sha256) "
+            "VALUES ('raw-foreign','foreign-run','fixture','ep','2026-11-09T10:00:00Z','{}','{}','foreign-hash')"
+        )
+        foreign_hash = snapshot_content_hash([foreign_record])
+        self.conn.execute(
+            "INSERT INTO a13_snapshot_decisions "
+            "(snapshot_id,dataset_type,record_ids_json,dataset_status,assessments_hash,findings_json,decided_at,policy_version,snapshot_content_hash) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            ('snap-foreign-raw','a1_discovery',json.dumps(['rec-1']),'approved_for_research',
+             'assesshash','[]','2026-11-09T10:01:00Z','a13-governance/0.1.0',foreign_hash)
+        )
+        # Deliberately bypass the record-aware lifecycle helper to exercise
+        # the consumer gate against inconsistent but structurally linked data.
+        register_snapshot(self.conn, snapshot_id='snap-foreign-raw', event_id='evt-foreign',
+            effective_at='2026-11-09T10:01:30Z', actor_id='g', reason='negative provenance fixture',
+            raw_response_ids=['raw-foreign'])
+        self.conn.execute(
+            "INSERT INTO a13_snapshot_evidence_links "
+            "(snapshot_id,record_id,raw_response_id,source_record_index,linked_at) VALUES (?,?,?,?,?)",
+            ('snap-foreign-raw','rec-1','raw-foreign',0,'2026-11-09T10:01:30Z')
+        )
+        with self.assertRaisesRegex(SnapshotAccessDenied, 'run/source/endpoint provenance'):
+            authorize_snapshot(self.conn, snapshot_id='snap-foreign-raw', records=[foreign_record],
+                expected_snapshot_hash=foreign_hash, expected_assessments_hash='assesshash',
+                allowed_policy_versions={'a13-governance/0.1.0'}, now='2026-11-09T10:02:00Z')
+
     def test_read_gate_rejects_registered_link_to_unapproved_raw_response(self):
         self._register( snapshot_id='snap-1', event_id='evt-1',
             effective_at='2026-11-09T10:01:30Z', actor_id='g', reason='bad raw link',
