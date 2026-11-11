@@ -14,7 +14,7 @@ import sqlite3
 from typing import Any, Callable, Iterable, Mapping
 
 from rooibos_db.database import _connect
-from rooibos_a6.parser import ParseContext, ParseResult, normalise_records
+from rooibos_a6.parser import ParseContext, ParseResult, assess_completeness, normalise_records
 from rooibos_a6.storage import persist_parse_result
 from rooibos_a13.models import SourcePolicy
 from rooibos_integrations.a13_projection import publish_a6_snapshot_from_storage
@@ -56,6 +56,7 @@ def process_a6_raw_response(
     reason: str,
     allow_warnings: bool = False,
     expected_record_ids: set[str] | None = None,
+    expected_candle_count: int = 100,
 ) -> A6PipelineResult:
     """Process one immutable captured response through parse, storage and A13.
 
@@ -86,6 +87,8 @@ def process_a6_raw_response(
         raise ValueError("response mint identity path must be a non-empty tuple of field names")
     if not snapshot_id or not actor_id or not reason:
         raise ValueError("snapshot_id, actor_id and reason are required")
+    if isinstance(expected_candle_count, bool) or not isinstance(expected_candle_count, int) or expected_candle_count < 1:
+        raise ValueError("expected_candle_count must be a positive integer")
 
     db_path = framework.db_path
     conn = _connect(db_path)
@@ -164,6 +167,7 @@ def process_a6_raw_response(
                 raise ValueError("A6 decoder omitted or altered original response records; source provenance is incomplete")
         framework.transition(run_id, "parsed")
         parsed = normalise_records(records, parse_context)
+        completeness = assess_completeness(parsed, expected_count=expected_candle_count)
         stored = persist_parse_result(
             db_path, result=parsed, raw_response_id=raw_response_id,
         )
@@ -205,7 +209,8 @@ def process_a6_raw_response(
         # Do not allow an otherwise-valid subset to conceal rejected records,
         # conflicting variants or conflicts with already-persisted candles.
         blocking_parse_findings = (
-            parsed.rejected_count > 0
+            not completeness["coverage_achieved"]
+            or parsed.rejected_count > 0
             or parsed.conflict_count > 0
             or stored["storage_conflict_count"] > 0
             or stored["parser_conflict_variant_count"] > 0
@@ -217,7 +222,9 @@ def process_a6_raw_response(
                     "A6 output withheld from A13: "
                     f"candles={len(candle_ids)}, rejected={parsed.rejected_count}, "
                     f"parser_conflicts={parsed.conflict_count}, "
-                    f"storage_conflicts={stored['storage_conflict_count']}"
+                    f"storage_conflicts={stored['storage_conflict_count']}, "
+                    f"closed={completeness['unique_closed_count']}/{expected_candle_count}, "
+                    f"gaps={completeness['gap_count']}"
                 ),
             )
             return A6PipelineResult(parsed, stored, candle_ids, (), None, None)
