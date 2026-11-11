@@ -49,6 +49,8 @@ def validate_a1_source_record_coverage(observations: Iterable[DiscoveryObservati
     if len(set(counts)) != 1:
         raise ValueError("A1 decoded records disagree on original source_record_count")
     indices = [row.context.source_record_index for row in rows]
+    if any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in indices):
+        raise ValueError("A1 decoder must supply non-negative integer original source_record_index values")
     if len(set(indices)) != len(indices):
         raise ValueError("A1 decoder returned duplicate original source_record_index values")
     if len(rows) != counts[0] or set(indices) != set(range(counts[0])):
