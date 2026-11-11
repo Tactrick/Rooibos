@@ -1,4 +1,5 @@
 import sqlite3
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -236,6 +237,48 @@ class Migration001Tests(unittest.TestCase):
         sqls = {1: MIGRATION_001_SQL, 2: MIGRATION_002_SQL, 3: MIGRATION_003_SQL,
                 4: MIGRATION_004_SQL, 5: MIGRATION_005_SQL, 6: MIGRATION_006_SQL, 7: MIGRATION_007_SQL}
         self.assertEqual({v: migration_checksum(sqls[v]) for v in expected}, expected)
+
+    def test_v1_8_example_database_upgrades_to_migrations_009_and_010(self):
+        example_db = Path(__file__).resolve().parents[1] / "examples" / "moby_market_example.db"
+        self.assertTrue(example_db.is_file(), "v1.8.0 example database fixture is missing")
+        upgrade_db = self.base / "v1_8_upgrade.db"
+        shutil.copy2(example_db, upgrade_db)
+
+        conn = _connect(upgrade_db)
+        try:
+            before_version = conn.execute(
+                "SELECT MAX(version) FROM schema_migrations"
+            ).fetchone()[0]
+            self.assertEqual(before_version, 8)
+            before_candles = conn.execute("SELECT COUNT(*) FROM ohlcv_candles").fetchone()[0]
+            expected_backfill = conn.execute(
+                "SELECT COUNT(*) FROM ohlcv_candles WHERE source_record_index IS NOT NULL"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+
+        initialize_database(upgrade_db)
+        conn = _connect(upgrade_db)
+        try:
+            self.assertEqual(
+                conn.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0],
+                10,
+            )
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM ohlcv_candles").fetchone()[0],
+                before_candles,
+            )
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM a6_candle_evidence_links").fetchone()[0],
+                expected_backfill,
+            )
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM a13_snapshot_evidence_links").fetchone()[0],
+                0,
+            )
+            self.assertEqual(check_integrity(upgrade_db)["ok"], True)
+        finally:
+            conn.close()
 
     def test_migrations_008_to_010_checksums_are_persisted_and_immutable(self):
         initialize_database(self.db)
