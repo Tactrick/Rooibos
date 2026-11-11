@@ -37,6 +37,23 @@ class A1PipelineResult:
         return self.grant is not None
 
 
+def validate_a1_source_record_coverage(observations: Iterable[DiscoveryObservation]) -> None:
+    """Require exact one-to-one coverage of the captured provider record array."""
+    rows = list(observations)
+    if not rows:
+        raise ValueError("A1 source response contains no decoded records")
+    counts = [row.context.source_record_count for row in rows]
+    if any(isinstance(value, bool) or not isinstance(value, int) or value < 1 for value in counts):
+        raise ValueError("A1 decoder must supply the original source_record_count for every record")
+    if len(set(counts)) != 1:
+        raise ValueError("A1 decoded records disagree on original source_record_count")
+    indices = [row.context.source_record_index for row in rows]
+    if len(set(indices)) != len(indices):
+        raise ValueError("A1 decoder returned duplicate original source_record_index values")
+    if len(rows) != counts[0] or set(indices) != set(range(counts[0])):
+        raise ValueError("A1 decoder omitted or altered original response records; source provenance is incomplete")
+
+
 def process_a1_raw_response(
     framework: CollectorFramework,
     *,
@@ -110,6 +127,7 @@ def process_a1_raw_response(
                 provenance.endpoint_id, provenance.raw_response_id,
             ):
                 raise ValueError("A1 adapter provenance differs from persisted raw response")
+        validate_a1_source_record_coverage(observations)
 
         framework.transition(run_id, "parsed")
         conn = _connect(db_path)
