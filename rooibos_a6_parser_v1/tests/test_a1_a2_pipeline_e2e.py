@@ -13,7 +13,9 @@ from rooibos_collectors import CollectorFramework, EndpointPolicy
 from rooibos_collectors.a1_pipeline import process_a1_raw_response
 from rooibos_collectors.a2_pipeline import process_a2_raw_response
 from rooibos_a1.models import DiscoveryContext, normalize_observation as normalize_a1
-from rooibos_a2.normalizer import MarketMetricInput, MarketObservationInput
+from rooibos_a1.storage import store_observations
+from rooibos_a2.normalizer import MarketMetricInput, MarketObservationInput, normalize_observation as normalize_a2
+from rooibos_a2.storage import persist_a2_result
 from rooibos_a13.models import SourcePolicy
 
 MINT = "So11111111111111111111111111111111111111112"
@@ -136,6 +138,73 @@ class A1A2CollectorToA13E2ETests(unittest.TestCase):
             ).fetchone()[0], 1)
             self.assertEqual(conn.execute(
                 "SELECT COUNT(*) FROM a13_snapshot_raw_links WHERE snapshot_id='snap-a2-e2e'"
+            ).fetchone()[0], 1)
+        finally:
+            conn.close()
+
+    def test_a1_validation_state_allows_exact_replay_but_rejects_new_observations(self):
+        raw_id = "raw-a1-validation-lock"
+        run_id = self._capture("A1", {"records":[{"symbol":"FIRST"},{"symbol":"SECOND"}]}, raw_id)
+        context = DiscoveryContext(
+            "solana", MINT, "fixture_source", "fixture_endpoint",
+            run_id, raw_id, 0, "2026-11-11T10:00:01Z", source_record_count=2,
+        )
+        first = normalize_a1(
+            context, {"symbol":"FIRST"}, field_map={"symbol":"symbol"},
+        )
+        conn = _connect(self.db)
+        try:
+            self.assertEqual(store_observations(conn, [first]), 1)
+            conn.execute("UPDATE collection_runs SET status='validating' WHERE run_id=?", (run_id,))
+            conn.commit()
+            self.assertEqual(store_observations(conn, [first]), 0)
+            late = normalize_a1(
+                DiscoveryContext(
+                    "solana", MINT, "fixture_source", "fixture_endpoint",
+                    run_id, raw_id, 1, "2026-11-11T10:00:01Z", source_record_count=2,
+                ),
+                {"symbol":"SECOND"}, field_map={"symbol":"symbol"},
+            )
+            with self.assertRaisesRegex(ValueError, "after validation has begun"):
+                store_observations(conn, [late])
+            self.assertEqual(conn.execute(
+                "SELECT COUNT(*) FROM token_discovery_observations WHERE run_id=?", (run_id,)
+            ).fetchone()[0], 1)
+        finally:
+            conn.close()
+
+    def test_a2_validation_state_allows_exact_replay_but_rejects_new_observations(self):
+        raw_id = "raw-a2-validation-lock"
+        run_id = self._capture("A2", {"records":[{"liquidity":1234.5}]}, raw_id)
+        first = normalize_a2(MarketObservationInput(
+            chain="solana", mint_address=MINT, observed_at="2026-11-11T10:00:01Z",
+            source_id="fixture_source", endpoint_id="fixture_endpoint",
+            run_id=run_id, raw_response_id=raw_id, source_record_index=0,
+            metrics=(MarketMetricInput("liquidity", 1234.5),),
+            market_scope="token_aggregated", source_record_count=1,
+        ))
+        persist_a2_result(self.db, result=first)
+        conn = _connect(self.db)
+        try:
+            conn.execute("UPDATE collection_runs SET status='validating' WHERE run_id=?", (run_id,))
+            conn.commit()
+        finally:
+            conn.close()
+        replay = persist_a2_result(self.db, result=first)
+        self.assertEqual(replay["idempotent_replay_count"], 1)
+        late = normalize_a2(MarketObservationInput(
+            chain="solana", mint_address=MINT, observed_at="2026-11-11T10:00:01Z",
+            source_id="fixture_source", endpoint_id="fixture_endpoint",
+            run_id=run_id, raw_response_id=raw_id, source_record_index=0,
+            metrics=(MarketMetricInput("holder_count", 42),),
+            market_scope="token_aggregated", source_record_count=1,
+        ))
+        with self.assertRaisesRegex(ValueError, "after validation has begun"):
+            persist_a2_result(self.db, result=late)
+        conn = _connect(self.db)
+        try:
+            self.assertEqual(conn.execute(
+                "SELECT COUNT(*) FROM market_observations WHERE run_id=?", (run_id,)
             ).fetchone()[0], 1)
         finally:
             conn.close()
