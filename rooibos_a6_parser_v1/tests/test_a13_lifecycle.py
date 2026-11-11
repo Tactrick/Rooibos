@@ -1,7 +1,7 @@
 import json, sqlite3, tempfile, unittest
 from pathlib import Path
 from rooibos_db.database import initialize_database, _connect
-from rooibos_a13.models import EvidenceRecord
+from rooibos_a13.models import EvidenceRecord, canonical_hash
 from rooibos_a13.read_gate import authorize_snapshot, snapshot_content_hash, SnapshotAccessDenied
 from rooibos_a13.lifecycle import (LifecycleError, register_snapshot, supersede_snapshot,
     withdraw_snapshot, set_legal_hold, lifecycle_state, add_retention_policy, register_snapshot_for_records, supersede_snapshot_for_records,
@@ -11,8 +11,9 @@ class A13LifecycleTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory(); self.path=Path(self.tmp.name)/'moby_market.db'
         initialize_database(self.path); self.conn=_connect(self.path)
+        payload={'symbol':'X'}
         self.record=EvidenceRecord('rec-1','a1_discovery','solana','MintCaseSensitive','fixture','ep','run','raw',
-            '2026-11-09T10:00:00Z','norm-v1','payloadhash',{'symbol':'X'},0)
+            '2026-11-09T10:00:00Z','norm-v1',canonical_hash(payload),payload,0)
         self.hash=snapshot_content_hash([self.record])
         self._decision('snap-1','approved_for_research')
         self._decision('snap-2','approved_for_research')
