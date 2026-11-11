@@ -113,14 +113,19 @@ class A13LifecycleTests(unittest.TestCase):
         with self.assertRaises(SnapshotAccessDenied): self._gate(require_lifecycle=True)
         with self.assertRaises(sqlite3.IntegrityError): self.conn.execute("DELETE FROM a13_snapshot_lifecycle_events WHERE event_id='evt-2'")
 
-    def test_supersession_preserves_old_and_registers_replacement(self):
-        self._register(snapshot_id='snap-1',event_id='evt-1',effective_at='2026-11-09T10:01:30Z',actor_id='g',reason='publish',raw_response_ids=['raw'])
-        supersede_snapshot(self.conn,old_snapshot_id='snap-1',new_snapshot_id='snap-2',old_event_id='evt-2',new_event_id='evt-3',
-          effective_at='2026-11-09T10:04:00Z',actor_id='g',reason='corrected evidence',new_raw_response_ids=['raw'])
-        self.assertEqual(lifecycle_state(self.conn,'snap-1').state,'superseded')
-        self.assertEqual(lifecycle_state(self.conn,'snap-1').superseded_by,'snap-2')
-        self.assertEqual(lifecycle_state(self.conn,'snap-2').state,'registered')
-        with self.assertRaises(SnapshotAccessDenied): self._gate(snapshot='snap-1',require_lifecycle=True)
+    def test_raw_only_supersession_fails_closed_without_mutating_lifecycle(self):
+        self._register(snapshot_id='snap-1', event_id='evt-1',
+            effective_at='2026-11-09T10:01:30Z', actor_id='g', reason='publish',
+            raw_response_ids=['raw'])
+        with self.assertRaisesRegex(LifecycleError, 'not publication-safe'):
+            supersede_snapshot(self.conn, old_snapshot_id='snap-1',
+                new_snapshot_id='snap-2', old_event_id='evt-2', new_event_id='evt-3',
+                effective_at='2026-11-09T10:04:00Z', actor_id='g',
+                reason='corrected evidence', new_raw_response_ids=['raw'])
+        self.assertEqual(lifecycle_state(self.conn, 'snap-1').state, 'registered')
+        self.assertEqual(self.conn.execute(
+            "SELECT COUNT(*) FROM a13_snapshot_lifecycle_events WHERE snapshot_id='snap-2'"
+        ).fetchone()[0], 0)
 
     def test_supersession_registers_replacement_with_exact_record_provenance(self):
         self._register(snapshot_id='snap-1', event_id='evt-1',
