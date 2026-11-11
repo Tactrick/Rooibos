@@ -19,7 +19,7 @@ class A13LifecycleTests(unittest.TestCase):
         self.conn.execute("INSERT INTO sources(source_id,source_name,source_type) VALUES ('fixture','Fixture','api')")
         self.conn.execute("INSERT INTO source_endpoints(endpoint_id,source_id,endpoint_name,method,path) VALUES ('ep','fixture','fixture_endpoint','GET','/fixture')")
         self.conn.execute("INSERT INTO collectors(collector_id,collector_name,module_code,version) VALUES ('collector','Fixture','A1','1')")
-        self.conn.execute("INSERT INTO collection_runs(run_id,collector_id,source_id,collector_version,requested_scope_json,started_at,status) VALUES ('run','collector','fixture','1','{}','2026-11-09T09:00:00Z','completed')")
+        self.conn.execute("INSERT INTO collection_runs(run_id,collector_id,source_id,endpoint_id,collector_version,requested_scope_json,started_at,status) VALUES ('run','collector','fixture','ep','1','{}','2026-11-09T09:00:00Z','completed')")
         self.conn.execute("INSERT INTO raw_responses(raw_response_id,run_id,source_id,endpoint_id,retrieved_at,request_params_json,payload_json,payload_sha256) VALUES ('raw','run','fixture','ep','2026-11-09T10:00:00Z','{}','{}','hash')")
         self.conn.execute("INSERT INTO raw_responses(raw_response_id,run_id,source_id,endpoint_id,retrieved_at,request_params_json,payload_json,payload_sha256) VALUES ('raw-other','run','fixture','ep','2026-11-09T10:00:00Z','{}','{\"other\":true}','other-hash')")
 
@@ -92,8 +92,8 @@ class A13LifecycleTests(unittest.TestCase):
         from dataclasses import replace
         foreign_record = replace(self.record, raw_response_id='raw-foreign')
         self.conn.execute(
-            "INSERT INTO collection_runs(run_id,collector_id,source_id,collector_version,requested_scope_json,started_at,status) "
-            "VALUES ('foreign-run','collector','fixture','1','{}','2026-11-09T09:30:00Z','completed')"
+            "INSERT INTO collection_runs(run_id,collector_id,source_id,endpoint_id,collector_version,requested_scope_json,started_at,status) "
+            "VALUES ('foreign-run','collector','fixture','ep','1','{}','2026-11-09T09:30:00Z','completed')"
         )
         self.conn.execute(
             "INSERT INTO raw_responses(raw_response_id,run_id,source_id,endpoint_id,retrieved_at,request_params_json,payload_json,payload_sha256) "
