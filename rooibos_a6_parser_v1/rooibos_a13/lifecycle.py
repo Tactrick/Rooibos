@@ -197,17 +197,29 @@ def register_snapshot_for_records(conn: sqlite3.Connection, *, snapshot_id: str,
         index = record.source_record_index
         if isinstance(index, bool) or not isinstance(index, int) or index < 0:
             raise LifecycleError("every approved record must reference a valid original source-record index")
-    register_snapshot(conn, snapshot_id=snapshot_id, event_id=event_id, effective_at=effective_at,
-                      actor_id=actor_id, reason=reason, raw_response_ids=raw_ids,
-                      commit=commit)
-    for record in records:
-        conn.execute(
-            "INSERT INTO a13_snapshot_evidence_links "
-            "(snapshot_id, record_id, raw_response_id, source_record_index, linked_at) "
-            "VALUES (?,?,?,?,?)",
-            (snapshot_id, record.record_id, record.raw_response_id,
-             record.source_record_index, effective_at),
-        )
+    owns_transaction = not conn.in_transaction
+    conn.execute("SAVEPOINT a13_register_snapshot_for_records")
+    try:
+        register_snapshot(conn, snapshot_id=snapshot_id, event_id=event_id,
+                          effective_at=effective_at, actor_id=actor_id, reason=reason,
+                          raw_response_ids=raw_ids, commit=False)
+        for record in records:
+            conn.execute(
+                "INSERT INTO a13_snapshot_evidence_links "
+                "(snapshot_id, record_id, raw_response_id, source_record_index, linked_at) "
+                "VALUES (?,?,?,?,?)",
+                (snapshot_id, record.record_id, record.raw_response_id,
+                 record.source_record_index, effective_at),
+            )
+        conn.execute("RELEASE SAVEPOINT a13_register_snapshot_for_records")
+        if commit and owns_transaction:
+            conn.commit()
+    except Exception:
+        conn.execute("ROLLBACK TO SAVEPOINT a13_register_snapshot_for_records")
+        conn.execute("RELEASE SAVEPOINT a13_register_snapshot_for_records")
+        if commit and owns_transaction:
+            conn.rollback()
+        raise
 
 
 def supersede_snapshot(conn: sqlite3.Connection, *, old_snapshot_id: str, new_snapshot_id: str,
