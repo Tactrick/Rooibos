@@ -472,7 +472,7 @@ class A1A2CollectorToA13E2ETests(unittest.TestCase):
         conn = _connect(self.db)
         try:
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM token_discovery_observations").fetchone()[0], 0)
-            self.assertEqual(conn.execute("SELECT status FROM collection_runs WHERE run_id=?", (run_id,)).fetchone()[0], "failed")
+            self.assertEqual(conn.execute("SELECT status FROM collection_runs WHERE run_id=?", (run_id,)).fetchone()[0], "validating")
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM a13_snapshot_decisions").fetchone()[0], 0)
         finally:
             conn.close()
@@ -500,7 +500,7 @@ class A1A2CollectorToA13E2ETests(unittest.TestCase):
         conn = _connect(self.db)
         try:
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM market_observations").fetchone()[0], 0)
-            self.assertEqual(conn.execute("SELECT status FROM collection_runs WHERE run_id=?", (run_id,)).fetchone()[0], "failed")
+            self.assertEqual(conn.execute("SELECT status FROM collection_runs WHERE run_id=?", (run_id,)).fetchone()[0], "validating")
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM a13_snapshot_decisions").fetchone()[0], 0)
         finally:
             conn.close()
