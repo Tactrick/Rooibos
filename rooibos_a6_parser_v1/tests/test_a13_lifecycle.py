@@ -122,8 +122,8 @@ class A13LifecycleTests(unittest.TestCase):
         from dataclasses import replace
         foreign_record = replace(self.record, raw_response_id='raw-foreign')
         self.conn.execute(
-            "INSERT INTO collection_runs(run_id,collector_id,source_id,collector_version,requested_scope_json,started_at,status) "
-            "VALUES ('foreign-run','collector','fixture','1','{}','2026-11-09T09:30:00Z','completed')"
+            "INSERT INTO collection_runs(run_id,collector_id,source_id,endpoint_id,collector_version,requested_scope_json,started_at,status) "
+            "VALUES ('foreign-run','collector','fixture','ep','1','{}','2026-11-09T09:30:00Z','completed')"
         )
         self.conn.execute(
             "INSERT INTO raw_responses(raw_response_id,run_id,source_id,endpoint_id,retrieved_at,request_params_json,payload_json,payload_sha256) "
