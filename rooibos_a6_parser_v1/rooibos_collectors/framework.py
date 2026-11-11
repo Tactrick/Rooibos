@@ -281,7 +281,7 @@ class CollectorFramework:
                    SET response_count=(
                        SELECT COUNT(*) FROM raw_responses WHERE run_id=?
                    ),status='raw_captured'
-                   WHERE run_id=? AND status='collecting'""",
+                   WHERE run_id=? AND status IN ('collecting','raw_captured')""",
                 (ticket.run_id, ticket.run_id),
             )
             if updated.rowcount != 1:
