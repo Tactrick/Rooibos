@@ -164,5 +164,5 @@ class A6QuarantineAndReplayTests(A6CollectorToA13E2ETests):
 
 
 # Reuse the fixture policy declared by the end-to-end acceptance suite.
-from test_a6_pipeline_e2e import POLICIES
+from test_a6_pipeline_e2e import MINT, POLICIES
 from rooibos_db.database import _connect
