@@ -99,6 +99,14 @@ def process_a1_raw_response(
             raise ValueError("A1 raw response does not belong to the requested collection run")
         if raw["status"] != "raw_captured":
             raise ValueError(f"A1 response must be processed from raw_captured state, not {raw['status']!r}")
+        response_count = conn.execute(
+            "SELECT COUNT(*) FROM raw_responses WHERE run_id=?", (run_id,)
+        ).fetchone()[0]
+        if response_count != 1:
+            raise ValueError(
+                "A1 single-response pipeline requires exactly one captured response per run; "
+                "multi-response aggregation is not implemented"
+            )
         payload = json.loads(raw["payload_json"])
         provenance = A1ResponseProvenance(
             raw["run_id"], raw["source_id"], raw["endpoint_id"],
