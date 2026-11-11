@@ -150,6 +150,20 @@ def process_a2_raw_response(
 
         framework.transition(run_id, "parsed")
         stored = persist_a2_result(db_path, result=result)
+        if inputs:
+            from .record_manifest import store_record_manifest
+            membership = {}
+            for item in result.observations:
+                membership.setdefault(item.source_record_index, []).append(item.observation_id)
+            manifest_conn = _connect(db_path)
+            try:
+                store_record_manifest(
+                    manifest_conn, run_id=run_id, raw_response_id=raw_response_id,
+                    collector_module="A2", source_record_count=inputs[0].source_record_count,
+                    membership=membership,
+                )
+            finally:
+                manifest_conn.close()
         framework.transition(run_id, "normalised")
         framework.transition(run_id, "validating")
 
