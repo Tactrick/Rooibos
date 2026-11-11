@@ -9,6 +9,8 @@ from rooibos_a1.storage import store_observation as store_a1_observation
 from rooibos_a2.normalizer import MarketMetricInput, MarketObservationInput, normalize_observation as normalize_a2
 from rooibos_a6.parser import ParseContext, normalise_records
 from rooibos_a13.models import SourcePolicy
+from rooibos_a13.models import RecordAssessment, Finding
+from rooibos_a13.storage import store_assessment
 from rooibos_a13.read_gate import authorize_snapshot, snapshot_content_hash, SnapshotAccessDenied
 from rooibos_integrations.a13_projection import project_a1, project_a2, project_a6, assess_and_store_snapshot
 from rooibos_a13.lifecycle import register_snapshot_for_records
@@ -25,6 +27,42 @@ class A13PipelineIntegrationTests(unittest.TestCase):
 
     def tearDown(self):
         self.conn.close(); self.tmp.cleanup()
+
+    def test_assessment_insert_ignore_requires_exact_immutable_retry(self):
+        original = RecordAssessment(
+            "record-one", "valid", (), "2026-11-11T10:00:00Z"
+        )
+        self.assertTrue(store_assessment(
+            self.conn, original, "assessment-one", "hash-one"
+        ))
+        self.assertFalse(store_assessment(
+            self.conn, original, "assessment-one", "hash-one"
+        ))
+
+        changed_same_id = RecordAssessment(
+            "record-one", "rejected",
+            (Finding("BAD", "error", "changed assessment"),),
+            "2026-11-11T10:00:00Z"
+        )
+        with self.assertRaisesRegex(ValueError, "different immutable assessment content"):
+            store_assessment(
+                self.conn, changed_same_id, "assessment-one", "hash-two"
+            )
+
+        changed_same_hash = RecordAssessment(
+            "record-two", "valid", (), "2026-11-11T10:00:00Z"
+        )
+        with self.assertRaisesRegex(ValueError, "different immutable assessment content"):
+            store_assessment(
+                self.conn, changed_same_hash, "assessment-two", "hash-one"
+            )
+
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT COUNT(*) FROM a13_record_assessments"
+            ).fetchone()[0],
+            1,
+        )
 
     def test_migration_chain_001_to_010_and_legacy_schema(self):
         versions = [r[0] for r in self.conn.execute("SELECT version FROM schema_migrations ORDER BY version")]
