@@ -211,6 +211,61 @@ class A13PipelineIntegrationTests(unittest.TestCase):
             source_policies=POLICIES, assessed_at="2026-11-09T10:01:00Z", decided_at="2026-11-09T10:02:00Z")
         self.assertEqual(decision.dataset_status, "approved_for_research")
 
+    def test_a13_independently_rejects_malformed_a2_metrics_and_preserves_pool_identity(self):
+        base = dict(
+            chain="solana", mint_address=MINT, observed_at="2026-11-09T10:00:00Z",
+            source_id="fixture_source", endpoint_id="fixture_endpoint",
+            run_id="run-a2-validator", raw_response_id="raw-a2-validator",
+            source_record_index=0,
+        )
+        pool_item = MarketObservationInput(
+            **base, market_scope="pool_specific", pool_address="Pool111",
+            metrics=(MarketMetricInput("liquidity", 123.0),),
+        )
+        pool_metric = normalize_a2(pool_item).observations[0]
+        pool_record = project_a2(pool_metric)
+        self.assertEqual(pool_record.payload["pool_address"], "Pool111")
+        self.assertEqual(
+            assess_record(pool_record, POLICIES, assessed_at="2026-11-09T10:01:00Z").status,
+            "valid",
+        )
+
+        valid_metric = normalize_a2(MarketObservationInput(
+            **base, metrics=(MarketMetricInput("liquidity", 123.0),),
+        )).observations[0]
+        valid_record = project_a2(valid_metric)
+        invalid_payloads = (
+            {"value": -1.0},
+            {"value": float("nan")},
+            {"metric": "unregistered_metric"},
+            {"unit": "quote_per_token"},
+            {"market_scope": "invented_scope"},
+            {"window_seconds": True},
+            {"window_seconds": 0},
+        )
+        for change in invalid_payloads:
+            with self.subTest(change=change):
+                payload = dict(valid_record.payload)
+                payload.update(change)
+                malformed = replace(
+                    valid_record, payload=payload, content_hash=canonical_hash(payload)
+                )
+                assessment = assess_record(
+                    malformed, POLICIES, assessed_at="2026-11-09T10:01:00Z"
+                )
+                self.assertEqual(assessment.status, "rejected")
+
+        no_pool_identity = MarketObservationInput(
+            **base, market_scope="pool_specific",
+            metrics=(MarketMetricInput("liquidity", 123.0),),
+        )
+        no_identity_record = project_a2(normalize_a2(no_pool_identity).observations[0])
+        self.assertEqual(
+            assess_record(no_identity_record, POLICIES,
+                          assessed_at="2026-11-09T10:01:00Z").status,
+            "rejected",
+        )
+
     def test_a6_projection_unconfirmed_is_not_promoted_to_closed(self):
         context = ParseContext("solana", "asset-1", MINT, "15m", "fixture_source",
             "fixture_endpoint", "run-a6", "raw-a6", volume_unit="base_token")
