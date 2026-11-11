@@ -141,6 +141,14 @@ def process_a1_raw_response(
         keys = tuple(sorted({item.observation_key for item in observations}))
         conn = _connect(db_path)
         try:
+            # Hold the run's write lock across A13 publication and the final
+            # authorization check/completion. Cancellation cannot split them.
+            conn.execute("BEGIN IMMEDIATE")
+            run_state = conn.execute(
+                "SELECT status FROM collection_runs WHERE run_id=?", (run_id,)
+            ).fetchone()
+            if run_state is None or run_state["status"] != "validating":
+                raise ValueError("A13 publication requires a run still in validating state")
             records, assessments, decision, grant = publish_a1_snapshot_from_storage(
                 conn, keys, snapshot_id=snapshot_id,
                 source_policies=source_policies, assessed_at=assessed_at,
@@ -149,18 +157,24 @@ def process_a1_raw_response(
                 allow_warnings=allow_warnings,
                 expected_record_ids=expected_record_ids,
             )
+            if grant is None:
+                conn.execute(
+                    """UPDATE collection_runs
+                       SET status='quarantined', completed_at=?, error_summary=?
+                       WHERE run_id=? AND status='validating'""",
+                    (__import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+                     f"A13 decision quarantined snapshot: {decision.dataset_status}", run_id),
+                )
+            else:
+                framework.complete_after_a13_publication(
+                    run_id, grant=grant, records=records, connection=conn,
+                )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             conn.close()
-
-        if grant is None:
-            framework.transition(
-                run_id, "quarantined",
-                error_summary=f"A13 decision quarantined snapshot: {decision.dataset_status}",
-            )
-        else:
-            framework.complete_after_a13_publication(
-                run_id, grant=grant, records=records,
-            )
         return A1PipelineResult(
             observations, inserted, keys, tuple(assessments), decision, grant,
         )
