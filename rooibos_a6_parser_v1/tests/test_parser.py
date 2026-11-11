@@ -116,6 +116,17 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(report["gap_count"], 1)
         self.assertFalse(report["coverage_achieved"])
 
+    def test_forming_candle_cannot_bridge_gap_between_closed_candles(self):
+        result = normalise_records([
+            row(BASE),
+            row(BASE + 900_000, candle_status="forming"),
+            row(BASE + 2 * 900_000),
+        ], context())
+        report = assess_completeness(result, expected_count=2)
+        self.assertEqual(report["unique_closed_count"], 2)
+        self.assertEqual(report["gap_count"], 1)
+        self.assertFalse(report["coverage_achieved"])
+
     def test_exactly_100_consecutive_closed_candles_complete(self):
         records = [row(BASE + i * 900_000) for i in range(100)]
         result = normalise_records(records, context())
