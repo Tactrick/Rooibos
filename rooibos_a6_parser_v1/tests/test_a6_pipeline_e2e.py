@@ -12,6 +12,7 @@ from unittest.mock import patch
 from rooibos_db.database import initialize_database, _connect
 from rooibos_collectors import CollectorFramework, EndpointPolicy
 from rooibos_collectors.a6_pipeline import process_a6_raw_response
+from rooibos_collectors.publication_recovery import recover_a13_publication
 from rooibos_a6.parser import ParseContext
 from rooibos_a13.models import SourcePolicy
 from rooibos_integrations.a13_projection import publish_a6_snapshot_from_storage as real_publish
@@ -119,6 +120,79 @@ class A6CollectorToA13E2ETests(unittest.TestCase):
             self.assertEqual(conn.execute(
                 "SELECT COUNT(*) FROM a6_candle_evidence_links WHERE raw_response_id='raw-a6-success'"
             ).fetchone()[0], 2)
+        finally:
+            conn.close()
+
+    def test_a6_publication_only_recovery_does_not_repeat_normalization(self):
+        raw_id = "raw-a6-publication-recovery"
+        run_id, payload = self._capture(raw_id)
+        context = self._context(run_id, raw_id)
+        kwargs = dict(
+            parse_context=context,
+            request_identity_fields={"mint_address": "mint", "interval": "interval"},
+            response_identity_fields={"mint_address": ("mint",)},
+            decode_payload=self._decode, snapshot_id="snap-a6-recovery",
+            source_policies=POLICIES,
+            assessed_at="2026-11-11T10:01:00Z",
+            decided_at="2026-11-11T10:02:00Z",
+            effective_at="2026-11-11T10:03:00Z",
+            actor_id="synthetic-test", reason="A6 publication recovery acceptance",
+        )
+        with patch("rooibos_collectors.a6_pipeline.publish_a6_snapshot_from_storage",
+                   side_effect=RuntimeError("synthetic A13 publication outage")):
+            with self.assertRaisesRegex(RuntimeError, "publication outage"):
+                process_a6_raw_response(
+                    self.framework, run_id=run_id, raw_response_id=raw_id, **kwargs,
+                )
+
+        conn = _connect(self.db)
+        try:
+            before = {
+                "candles": conn.execute(
+                    "SELECT COUNT(*) FROM ohlcv_candles WHERE run_id=?", (run_id,)
+                ).fetchone()[0],
+                "links": conn.execute(
+                    "SELECT COUNT(*) FROM a6_candle_evidence_links WHERE run_id=?", (run_id,)
+                ).fetchone()[0],
+                "events": conn.execute(
+                    "SELECT COUNT(*) FROM normalization_events WHERE run_id=?", (run_id,)
+                ).fetchone()[0],
+            }
+            self.assertEqual(before, {"candles": 2, "links": 2, "events": 1})
+            self.assertEqual(conn.execute(
+                "SELECT status FROM collection_runs WHERE run_id=?", (run_id,)
+            ).fetchone()[0], "validating")
+            self.assertIsNotNone(conn.execute(
+                "SELECT publication_failed_at FROM collection_runs WHERE run_id=?", (run_id,)
+            ).fetchone()[0])
+        finally:
+            conn.close()
+
+        recovered = recover_a13_publication(
+            self.framework, run_id=run_id, raw_response_id=raw_id,
+            snapshot_id="snap-a6-recovery", source_policies=POLICIES,
+            assessed_at=kwargs["assessed_at"], decided_at=kwargs["decided_at"],
+            effective_at=kwargs["effective_at"], actor_id=kwargs["actor_id"],
+            reason=kwargs["reason"],
+        )
+        self.assertTrue(recovered["published"])
+        conn = _connect(self.db)
+        try:
+            after = {
+                "candles": conn.execute(
+                    "SELECT COUNT(*) FROM ohlcv_candles WHERE run_id=?", (run_id,)
+                ).fetchone()[0],
+                "links": conn.execute(
+                    "SELECT COUNT(*) FROM a6_candle_evidence_links WHERE run_id=?", (run_id,)
+                ).fetchone()[0],
+                "events": conn.execute(
+                    "SELECT COUNT(*) FROM normalization_events WHERE run_id=?", (run_id,)
+                ).fetchone()[0],
+            }
+            self.assertEqual(after, before)
+            self.assertEqual(conn.execute(
+                "SELECT status FROM collection_runs WHERE run_id=?", (run_id,)
+            ).fetchone()[0], "completed")
         finally:
             conn.close()
 
