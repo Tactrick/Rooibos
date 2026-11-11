@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 import sqlite3
-from typing import Iterable
+from typing import Iterable, Mapping
 from .models import EvidenceRecord, canonical_hash
 
 class SnapshotAccessDenied(PermissionError):
@@ -71,6 +71,13 @@ def authorize_snapshot(conn: sqlite3.Connection, *, snapshot_id: str,
         raise SnapshotAccessDenied("record membership differs from approved snapshot")
     if any(r.dataset_type != dataset_type for r in rows):
         raise SnapshotAccessDenied("dataset type mismatch")
+    # Revalidate the payload itself at read time. The snapshot hash binds the
+    # stored content_hash, not a mutable Mapping supplied by the caller.
+    for record in rows:
+        if not isinstance(record.payload, Mapping) or canonical_hash(record.payload) != record.content_hash:
+            raise SnapshotAccessDenied(
+                "evidence payload hash does not match its A13 record content hash"
+            )
     if assessments_hash != expected_assessments_hash:
         raise SnapshotAccessDenied("assessment hash mismatch")
     if policy_version not in allowed_policy_versions:
