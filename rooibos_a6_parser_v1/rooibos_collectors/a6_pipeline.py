@@ -111,6 +111,14 @@ def process_a6_raw_response(
             raise ValueError("A6 pipeline can process only runs registered to the A6 collector module")
         if raw["status"] != "raw_captured":
             raise ValueError(f"A6 response must be processed from raw_captured state, not {raw['status']!r}")
+        response_count = conn.execute(
+            "SELECT COUNT(*) FROM raw_responses WHERE run_id=?", (run_id,)
+        ).fetchone()[0]
+        if response_count != 1:
+            raise ValueError(
+                "A6 single-response pipeline requires exactly one captured response per run; "
+                "multi-response aggregation is not implemented"
+            )
         request_params = json.loads(raw["request_params_json"])
         for context_field, request_field in request_identity_fields.items():
             if request_field not in request_params:
