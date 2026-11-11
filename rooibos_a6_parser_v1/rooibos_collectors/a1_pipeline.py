@@ -158,7 +158,9 @@ def process_a1_raw_response(
                 error_summary=f"A13 decision quarantined snapshot: {decision.dataset_status}",
             )
         else:
-            framework.transition(run_id, "completed")
+            framework.complete_after_a13_publication(
+                run_id, grant=grant, records=records,
+            )
         return A1PipelineResult(
             observations, inserted, keys, tuple(assessments), decision, grant,
         )
