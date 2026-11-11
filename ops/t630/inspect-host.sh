@@ -69,7 +69,7 @@ if [ -d /sys/firmware/efi ]; then printf 'Boot mode: UEFI\n'; else printf 'Boot 
 run mokutil --sb-state
 run tpm2_getcap properties-fixed
 
-section "Network overview (addresses and MACs intentionally omitted)"
+section "Network overview (interface addresses and MACs omitted; routes/listeners shown)"
 run ip -brief link
 run ip route
 run ss -lntu
