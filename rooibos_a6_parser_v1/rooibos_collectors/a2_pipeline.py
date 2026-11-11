@@ -40,6 +40,23 @@ class A2PipelineResult:
         return self.grant is not None
 
 
+def validate_a2_source_record_coverage(inputs: Iterable[MarketObservationInput]) -> None:
+    """Require exact coverage of source records before metric fan-out."""
+    rows = list(inputs)
+    if not rows:
+        raise ValueError("A2 source response contains no decoded records")
+    counts = [row.source_record_count for row in rows]
+    if any(isinstance(value, bool) or not isinstance(value, int) or value < 1 for value in counts):
+        raise ValueError("A2 decoder must supply the original source_record_count for every source record")
+    if len(set(counts)) != 1:
+        raise ValueError("A2 decoded records disagree on original source_record_count")
+    indices = [row.source_record_index for row in rows]
+    if len(set(indices)) != len(indices):
+        raise ValueError("A2 decoder returned duplicate source records")
+    if len(rows) != counts[0] or set(indices) != set(range(counts[0])):
+        raise ValueError("A2 decoder omitted or altered original response records; source provenance is incomplete")
+
+
 def process_a2_raw_response(
     framework: CollectorFramework,
     *,
@@ -104,6 +121,7 @@ def process_a2_raw_response(
             normalized: list[Any] = []
             findings: list[A2Finding] = []
             received = rejected = 0
+            validate_a2_source_record_coverage(inputs)
             for item in inputs:
                 if not isinstance(item, MarketObservationInput):
                     raise TypeError("A2 provider decoder must return MarketObservationInput objects")
