@@ -126,6 +126,9 @@ GateGrant and exact evidence records to `complete_after_a13_publication()`.
 That method re-runs the A13 read gate, verifies every record belongs to the
 same collection run and that its raw response has matching run/source/endpoint
 metadata, then marks the run complete inside the same database transaction.
+A1 storage also acquires its SQLite write lock before checking run state and
+rejects writes to terminal runs, preventing late observations from being
+appended after A13-gated completion.
 
 Provider decoders are explicit injected functions. They only transform an
 already-captured payload into the relevant provider-neutral input model; they
