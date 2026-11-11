@@ -110,6 +110,36 @@ class A13PipelineIntegrationTests(unittest.TestCase):
             )
 
 
+    def test_a13_independently_rejects_malformed_a1_metadata(self):
+        context = DiscoveryContext(
+            "solana", MINT, "fixture_source", "fixture_endpoint",
+            "run-a1-validator", "raw-a1-validator", 0, "2026-11-09T10:00:00Z",
+        )
+        observation = normalize_a1(
+            context, {"symbol": "SOL", "decimals": 9},
+            field_map={"symbol": "symbol", "decimals": "decimals"},
+        )
+        record = project_a1(observation)
+        invalid_payloads = (
+            {"mint": "So1111111111111111111111111111111111111111Z"},
+            {"chain": "ethereum"},
+            {"symbol": 123},
+            {"decimals": True},
+            {"decimals": 256},
+            {"social_links": ["not", "an", "object"]},
+        )
+        for change in invalid_payloads:
+            with self.subTest(change=change):
+                payload = dict(record.payload)
+                payload.update(change)
+                malformed = replace(
+                    record, payload=payload, content_hash=canonical_hash(payload)
+                )
+                assessment = assess_record(
+                    malformed, POLICIES, assessed_at="2026-11-09T10:01:00Z"
+                )
+                self.assertEqual(assessment.status, "rejected")
+
     def test_a13_read_gate_requires_exact_record_raw_response_and_source_index_links(self):
         self.conn.execute("INSERT INTO sources(source_id,source_name,source_type) VALUES ('fixture_source','Fixture','api')")
         self.conn.execute("INSERT INTO source_endpoints(endpoint_id,source_id,endpoint_name,method,path) VALUES ('fixture_endpoint','fixture_source','fixture_endpoint','GET','/fixture')")
