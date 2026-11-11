@@ -150,6 +150,55 @@ class A2Tests(unittest.TestCase):
         self.assertTrue(cid)
         c=sqlite3.connect(self.db); self.assertEqual(c.execute('SELECT outcome FROM market_observation_comparisons').fetchone()[0],'within_tolerance'); c.close()
 
+    def test_comparison_rejects_forged_result(self):
+        from dataclasses import replace
+        a=normalize_observation(self.item()).observations[0]
+        b=normalize_observation(self.item(source='src2',endpoint='ep2',run='r2',raw='raw2')).observations[0]
+        persist_a2_result(self.db,result=normalize_observation(self.item()))
+        persist_a2_result(self.db,result=normalize_observation(self.item(source='src2',endpoint='ep2',run='r2',raw='raw2')))
+        genuine=compare_observations([a,b],tolerance_pct=5)
+        forged=replace(genuine,outcome='disagreement',minimum_value=1.0,maximum_value=999999.0)
+        with self.assertRaisesRegex(ValueError,'does not match persisted'):
+            persist_comparison(self.db,comparison=forged,observations=[a,b],tolerance_pct=5)
+        c=sqlite3.connect(self.db)
+        self.assertEqual(c.execute('SELECT COUNT(*) FROM market_observation_comparisons').fetchone()[0],0)
+        c.close()
+
+    def test_comparison_uses_persisted_values_not_caller_objects(self):
+        from dataclasses import replace
+        a=normalize_observation(self.item()).observations[0]
+        b=normalize_observation(self.item(source='src2',endpoint='ep2',run='r2',raw='raw2')).observations[0]
+        persist_a2_result(self.db,result=normalize_observation(self.item()))
+        persist_a2_result(self.db,result=normalize_observation(self.item(source='src2',endpoint='ep2',run='r2',raw='raw2')))
+        genuine=compare_observations([a,b],tolerance_pct=5)
+        altered=replace(a,numeric_value=999999.0,source_id='src2',run_id='r2',raw_response_id='raw2')
+        cid=persist_comparison(self.db,comparison=genuine,observations=[altered,b],tolerance_pct=5)
+        self.assertTrue(cid)
+        c=sqlite3.connect(self.db)
+        row=c.execute('SELECT outcome,minimum_value,maximum_value FROM market_observation_comparisons').fetchone()
+        c.close()
+        self.assertEqual(row,('within_tolerance',100000.0,100000.0))
+
+    def test_comparison_rejects_missing_and_duplicate_references(self):
+        a=normalize_observation(self.item()).observations[0]
+        persist_a2_result(self.db,result=normalize_observation(self.item()))
+        result=compare_observations([a])
+        from dataclasses import replace
+        with self.assertRaisesRegex(ValueError,'unique'):
+            persist_comparison(self.db,comparison=result,observations=[a,a],tolerance_pct=5)
+        missing=replace(a,observation_id='missing-observation')
+        with self.assertRaisesRegex(ValueError,'already persisted'):
+            persist_comparison(self.db,comparison=compare_observations([missing]),observations=[missing],tolerance_pct=5)
+        c=sqlite3.connect(self.db)
+        self.assertEqual(c.execute('SELECT COUNT(*) FROM market_observation_comparisons').fetchone()[0],0)
+        c.close()
+
+    def test_comparison_rejects_non_finite_tolerance(self):
+        a=normalize_observation(self.item()).observations[0]
+        result=compare_observations([a])
+        with self.assertRaisesRegex(ValueError,'finite non-negative'):
+            persist_comparison(self.db,comparison=result,observations=[a],tolerance_pct=float('nan'))
+
     def test_database_integrity(self):
         persist_a2_result(self.db,result=normalize_observation(self.item()))
         self.assertTrue(check_integrity(self.db)['ok'])
