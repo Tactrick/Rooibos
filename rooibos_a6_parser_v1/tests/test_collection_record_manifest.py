@@ -54,6 +54,18 @@ class CollectionRecordManifestTests(unittest.TestCase):
                 membership={0: ["obs-0"]},
             )
 
+    def test_rejects_record_id_reused_across_source_indexes_before_persisting(self):
+        with self.assertRaisesRegex(ValueError, "across source indexes"):
+            store_record_manifest(
+                self.conn, run_id="run-1", raw_response_id="raw-1",
+                collector_module="A1", source_record_count=2,
+                membership={0: ["same-observation"], 1: ["same-observation"]},
+            )
+        self.assertEqual(
+            self.conn.execute("SELECT COUNT(*) FROM collection_record_manifests").fetchone()[0],
+            0,
+        )
+
     def test_rejects_manifest_for_wrong_raw_response(self):
         with self.assertRaisesRegex(ValueError, "does not belong"):
             store_record_manifest(
