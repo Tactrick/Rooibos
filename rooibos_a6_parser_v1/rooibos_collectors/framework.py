@@ -104,6 +104,10 @@ class CollectorFramework:
             conn.close()
 
     def transition(self, run_id: str, new_status: str, *, error_summary: str | None = None) -> None:
+        if new_status == "completed":
+            raise InvalidRunTransition(
+                "collector runs can complete only through complete_after_a13_publication()"
+            )
         conn = _connect(self.db_path)
         try:
             conn.execute("BEGIN IMMEDIATE")
@@ -118,6 +122,72 @@ class CollectorFramework:
             } else None
             conn.execute("UPDATE collection_runs SET status=?,completed_at=COALESCE(?,completed_at),error_summary=? WHERE run_id=?",
                          (new_status,completed_at,error_summary,run_id))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def complete_after_a13_publication(self, run_id: str, *, grant, records) -> None:
+        """Complete a run only after independently re-authorizing its A13 grant.
+
+        The grant is treated as a claim, not a bearer capability: the persisted
+        decision, exact snapshot membership, content hash, lifecycle, raw links
+        and record-to-raw-source coordinates are checked again inside the same
+        write transaction that marks the run complete.
+        """
+        from rooibos_a13.read_gate import GateGrant, authorize_snapshot
+
+        rows = list(records)
+        if not isinstance(grant, GateGrant) or not rows:
+            raise InvalidRunTransition("completion requires an A13 GateGrant and non-empty evidence records")
+        if any(getattr(record, "run_id", None) != run_id for record in rows):
+            raise InvalidRunTransition("A13 snapshot contains evidence from a different collection run")
+
+        conn = _connect(self.db_path)
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            run = conn.execute(
+                "SELECT status FROM collection_runs WHERE run_id=?", (run_id,)
+            ).fetchone()
+            if run is None:
+                raise KeyError(f"Unknown collection run: {run_id}")
+            if run["status"] != "validating":
+                raise InvalidRunTransition(
+                    f"A13 publication can complete only a validating run, not {run['status']!r}"
+                )
+
+            for record in rows:
+                raw = conn.execute(
+                    "SELECT run_id, source_id, endpoint_id FROM raw_responses WHERE raw_response_id=?",
+                    (record.raw_response_id,),
+                ).fetchone()
+                if raw is None or (
+                    raw["run_id"], raw["source_id"], raw["endpoint_id"]
+                ) != (run_id, record.source_id, record.endpoint_id):
+                    raise InvalidRunTransition(
+                        "A13 evidence raw-response provenance does not belong to this collection run"
+                    )
+
+            verified = authorize_snapshot(
+                conn,
+                snapshot_id=grant.snapshot_id,
+                records=rows,
+                expected_snapshot_hash=grant.snapshot_hash,
+                expected_assessments_hash=grant.assessments_hash,
+                allowed_policy_versions={grant.policy_version},
+                allow_warnings=(grant.dataset_status == "approved_with_warnings"),
+                require_lifecycle=True,
+            )
+            if verified != grant:
+                raise InvalidRunTransition("supplied A13 grant differs from freshly verified persisted authorization")
+
+            completed_at = datetime.now(timezone.utc).isoformat()
+            conn.execute(
+                "UPDATE collection_runs SET status='completed', completed_at=?, error_summary=NULL WHERE run_id=?",
+                (completed_at, run_id),
+            )
             conn.commit()
         except Exception:
             conn.rollback()
