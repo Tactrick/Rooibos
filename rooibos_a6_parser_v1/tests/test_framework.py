@@ -2,12 +2,14 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from rooibos_db.database import initialize_database, check_integrity
+import rooibos_collectors.framework as framework_module
 from rooibos_collectors import (
     CollectorFramework, CollectorPolicyError, EndpointPolicy, InvalidRunTransition,
 )
@@ -75,6 +77,45 @@ class CollectorFrameworkTests(unittest.TestCase):
         c.close()
         self.assertTrue(check_integrity(self.db)['ok'])
 
+
+    def test_response_capture_does_not_resurrect_run_cancelled_during_persistence(self):
+        self.create_run()
+        self.framework.transition('run1', 'configured')
+        ticket = self.framework.authorise_request(
+            'run1', {'mint':'MintABC','interval':'15m','limit':2}
+        )
+        original_store = framework_module.store_raw_response
+
+        def cancel_then_store(*args, **kwargs):
+            # Simulate cancellation after capture_response's initial status
+            # check but before its final run-state update.
+            self.framework.transition('run1', 'cancelled')
+            return original_store(*args, **kwargs)
+
+        with patch.object(framework_module, 'store_raw_response', side_effect=cancel_then_store):
+            with self.assertRaisesRegex(
+                InvalidRunTransition, 'left collecting state'
+            ):
+                self.framework.capture_response(
+                    ticket, raw_response_id='raw-cancel-race',
+                    payload={'synthetic':True}, http_status=200,
+                    retrieved_at='2026-11-11T09:00:00Z', page_sequence=0,
+                )
+
+        c = sqlite3.connect(self.db)
+        run = c.execute(
+            'SELECT status,response_count FROM collection_runs WHERE run_id=?',
+            ('run1',),
+        ).fetchone()
+        raw_count = c.execute(
+            'SELECT COUNT(*) FROM raw_responses WHERE raw_response_id=?',
+            ('raw-cancel-race',),
+        ).fetchone()[0]
+        c.close()
+        self.assertEqual(run, ('cancelled', 0))
+        # The immutable response may remain as audit evidence, but it must not
+        # move the terminal run back into a collectable state.
+        self.assertEqual(raw_count, 1)
 
     def test_a6_raw_capture_to_a13_publication_end_to_end(self):
         self.create_run()
