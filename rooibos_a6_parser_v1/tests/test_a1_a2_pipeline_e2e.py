@@ -174,5 +174,40 @@ class A1A2CollectorToA13E2ETests(unittest.TestCase):
             conn.close()
 
 
+    def test_a2_incomplete_original_coverage_fails_before_metric_persistence_or_publication(self):
+        raw_id = "raw-a2-incomplete"
+        run_id = self._capture("A2", {"records":[{"liquidity":1234.5},{"liquidity":987.0}]}, raw_id)
+
+        def decode(payload, provenance):
+            return [MarketObservationInput(
+                chain="solana", mint_address=MINT, observed_at=provenance.retrieved_at,
+                source_id=provenance.source_id, endpoint_id=provenance.endpoint_id,
+                run_id=provenance.run_id, raw_response_id=provenance.raw_response_id,
+                source_record_index=0,
+                metrics=(MarketMetricInput("liquidity", payload["records"][0]["liquidity"]),),
+                market_scope="token_aggregated", source_record_count=2,
+            )]
+
+        with self.assertRaisesRegex(ValueError, "omitted or altered"):
+            process_a2_raw_response(
+                self.framework, run_id=run_id, raw_response_id=raw_id,
+                decode_payload=decode, snapshot_id="snap-a2-incomplete",
+                source_policies=POLICIES, **self._times(),
+            )
+        conn = _connect(self.db)
+        try:
+            self.assertEqual(conn.execute(
+                "SELECT COUNT(*) FROM market_observations"
+            ).fetchone()[0], 0)
+            self.assertEqual(conn.execute(
+                "SELECT status FROM collection_runs WHERE run_id=?", (run_id,)
+            ).fetchone()[0], "failed")
+            self.assertEqual(conn.execute(
+                "SELECT COUNT(*) FROM a13_snapshot_decisions WHERE snapshot_id='snap-a2-incomplete'"
+            ).fetchone()[0], 0)
+        finally:
+            conn.close()
+
+
 if __name__ == "__main__":
     unittest.main()
