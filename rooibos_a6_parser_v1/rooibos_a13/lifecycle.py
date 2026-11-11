@@ -338,3 +338,65 @@ def assess_retention(conn: sqlite3.Connection, *, snapshot_id: str, now: str) ->
         expired=current >= expiry
         return RetentionAssessment(snapshot_id,assignment["policy_id"],expiry.isoformat().replace("+00:00","Z"),expired,state.legal_hold,raw,False)
     return RetentionAssessment(snapshot_id,None,None,False,state.legal_hold,raw,False)
+
+def supersede_snapshot_for_records(conn: sqlite3.Connection, *, old_snapshot_id: str,
+                                   new_snapshot_id: str, old_event_id: str,
+                                   new_event_id: str, effective_at: str,
+                                   actor_id: str, reason: str, records,
+                                   commit: bool = True) -> None:
+    """Atomically supersede a snapshot and register its replacement with exact
+    record-to-raw-response/source-index provenance.
+
+    Unlike the legacy raw-response-only helper, this is the publication-safe
+    replacement path. The replacement is not lifecycle-registered unless its
+    approved membership, content hash, and per-record source coordinates pass.
+    """
+    from .read_gate import snapshot_content_hash
+
+    rows = list(records)
+    if not rows:
+        raise LifecycleError("replacement snapshot requires approved evidence records")
+    old = conn.execute(
+        "SELECT dataset_type FROM a13_snapshot_decisions WHERE snapshot_id=?",
+        (old_snapshot_id,),
+    ).fetchone()
+    new = conn.execute(
+        "SELECT dataset_type, dataset_status, record_ids_json, snapshot_content_hash "
+        "FROM a13_snapshot_decisions WHERE snapshot_id=?",
+        (new_snapshot_id,),
+    ).fetchone()
+    if not old or not new:
+        raise LifecycleError("both old and replacement decisions must exist")
+    if old[0] != new[0] or new[1] not in ("approved_for_research", "approved_with_warnings"):
+        raise LifecycleError("replacement must be approved and have the same dataset type")
+    if set(json.loads(new[2])) != {record.record_id for record in rows}:
+        raise LifecycleError("replacement records differ from approved snapshot membership")
+    if len({record.record_id for record in rows}) != len(rows):
+        raise LifecycleError("replacement records must have unique IDs")
+    if snapshot_content_hash(rows) != new[3]:
+        raise LifecycleError("replacement content or source provenance differs from approved snapshot")
+
+    owns_transaction = not conn.in_transaction
+    conn.execute("SAVEPOINT a13_supersede_snapshot_for_records")
+    try:
+        _append_event(
+            conn, event_id=old_event_id, snapshot_id=old_snapshot_id,
+            event_type="superseded", effective_at=effective_at,
+            actor_id=actor_id, reason=reason, related_snapshot_id=new_snapshot_id,
+        )
+        register_snapshot_for_records(
+            conn, snapshot_id=new_snapshot_id, event_id=new_event_id,
+            effective_at=effective_at, actor_id=actor_id,
+            reason=f"Replacement for {old_snapshot_id}: {reason}",
+            records=rows, commit=False,
+        )
+        conn.execute("RELEASE SAVEPOINT a13_supersede_snapshot_for_records")
+        if commit and owns_transaction:
+            conn.commit()
+    except Exception:
+        conn.execute("ROLLBACK TO SAVEPOINT a13_supersede_snapshot_for_records")
+        conn.execute("RELEASE SAVEPOINT a13_supersede_snapshot_for_records")
+        if commit and owns_transaction:
+            conn.rollback()
+        raise
+
