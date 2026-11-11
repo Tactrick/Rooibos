@@ -264,8 +264,23 @@ class CollectorFramework:
         conn = _connect(self.db_path)
         try:
             conn.execute("BEGIN IMMEDIATE")
-            conn.execute("UPDATE collection_runs SET response_count=response_count+1,status='raw_captured' WHERE run_id=?", (ticket.run_id,))
-            conn.execute("UPDATE collection_requests SET response_status=? WHERE request_id=?", (http_status,ticket.request_id))
+            # The run may have been cancelled or failed after the initial
+            # ticket check and raw-response insert. Never resurrect a terminal
+            # run by unconditionally writing raw_captured here.
+            updated = conn.execute(
+                """UPDATE collection_runs
+                   SET response_count=response_count+1,status='raw_captured'
+                   WHERE run_id=? AND status='collecting'""",
+                (ticket.run_id,),
+            )
+            if updated.rowcount != 1:
+                raise InvalidRunTransition(
+                    "Collection run left collecting state before response capture completed"
+                )
+            conn.execute(
+                "UPDATE collection_requests SET response_status=? WHERE request_id=?",
+                (http_status,ticket.request_id),
+            )
             conn.commit()
         except Exception:
             conn.rollback()
