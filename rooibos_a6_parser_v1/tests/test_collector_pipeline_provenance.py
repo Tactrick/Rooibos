@@ -54,6 +54,22 @@ class CollectorSourceCoverageTests(unittest.TestCase):
     def test_a2_requires_adapter_supplied_source_count(self):
         with self.assertRaisesRegex(ValueError, "must supply"):
             validate_a2_source_record_coverage([self._a2(0, count=None)])
+ 
+    def test_a1_rejects_boolean_source_index(self):
+        with self.assertRaisesRegex(ValueError, "non-negative integer"):
+            validate_a1_source_record_coverage([self._a1(0), self._a1(True)])
+
+    def test_a1_rejects_float_source_index(self):
+        with self.assertRaisesRegex(ValueError, "non-negative integer"):
+            validate_a1_source_record_coverage([self._a1(0), self._a1(1.0)])
+
+    def test_a2_rejects_boolean_source_index(self):
+        with self.assertRaisesRegex(ValueError, "non-negative integer"):
+            validate_a2_source_record_coverage([self._a2(0), self._a2(True)])
+
+    def test_a2_rejects_float_source_index(self):
+        with self.assertRaisesRegex(ValueError, "non-negative integer"):
+            validate_a2_source_record_coverage([self._a2(0), self._a2(1.0)])
 
 
 if __name__ == "__main__":
