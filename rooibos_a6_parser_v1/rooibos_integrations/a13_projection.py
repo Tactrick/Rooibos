@@ -29,7 +29,8 @@ def project_a2(metric):
     value = metric.numeric_value if metric.numeric_value is not None else metric.text_value
     payload = {"metric": metric.metric_code, "value": value, "unit": metric.unit,
                "measurement_kind": metric.measurement_kind, "market_scope": metric.market_scope,
-               "market_id": metric.market_id, "value_status": metric.value_status,
+               "market_id": metric.market_id, "pool_address": metric.pool_address,
+               "value_status": metric.value_status,
                "quote_currency": metric.quote_currency, "window_seconds": metric.window_seconds,
                "metadata": json.loads(metric.metadata_json)}
     return _evidence("a2:" + metric.observation_id, "a2_market", metric.chain,
