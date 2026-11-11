@@ -26,7 +26,7 @@ class A13PipelineIntegrationTests(unittest.TestCase):
     def tearDown(self):
         self.conn.close(); self.tmp.cleanup()
 
-    def test_migration_chain_001_to_009_and_legacy_schema(self):
+    def test_migration_chain_001_to_010_and_legacy_schema(self):
         versions = [r[0] for r in self.conn.execute("SELECT version FROM schema_migrations ORDER BY version")]
         self.assertEqual(versions, [1,2,3,4,5,6,7,8,9,10])
         self.assertEqual(MIGRATION_VERSION, 10)
