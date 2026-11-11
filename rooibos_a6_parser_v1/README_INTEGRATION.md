@@ -115,23 +115,23 @@ for all three data families:
 - `process_a1_raw_response()`: verifies decoded discovery-observation
   provenance, batch-persists A1 records atomically, then publishes through A13.
 
-A1, A2 and A6 publication now share the same A13 transaction boundary:
-assessment, decision, raw-evidence links, lifecycle registration and final
-read-gate verification. The lifecycle registrar and read gate independently
-bind each evidence record's run/source/endpoint identity to both the immutable
-raw-response row and its owning collection-run metadata, in addition to
-checking exact raw-response/source-index links. The consumer read gate also
-recomputes each supplied payload hash so a mutable payload cannot be substituted
-while reusing an approved record's content hash.
-A quarantined decision remains auditable but is not registered or exposed to
-consumers. Parser/normalizer errors and provenance mismatches fail the run closed.
+A1, A2 and A6 publication now share one SQLite write transaction spanning
+A13 assessment, decision, raw-evidence links, lifecycle registration, final
+read-gate verification and the collector's terminal run-state update. The
+pipeline acquires `BEGIN IMMEDIATE` before publication and passes that active
+connection to `complete_after_a13_publication()`. A concurrent cancellation
+cannot split a committed A13 publication from run completion; if the final
+authorization gate fails, the publication and run-state changes roll back
+together. A quarantined decision remains auditable but is not registered or
+exposed to consumers. Parser/normalizer errors and provenance mismatches fail
+the run closed.
 
 Collector completion is no longer an ordinary framework transition.
 `transition(..., "completed")` is rejected; pipelines must supply the A13
 GateGrant and exact evidence records to `complete_after_a13_publication()`.
 That method re-runs the A13 read gate, verifies every record belongs to the
 same collection run and that its raw response has matching run/source/endpoint
-metadata, then marks the run complete inside the same database transaction.
+metadata, then marks the run complete within the publication transaction.
 A1 and A2 storage acquire a SQLite write lock before checking run state.
 Both allow exact idempotent replay while a run is validating, but reject any new
 observation after validation begins; terminal runs reject all new writes. This
