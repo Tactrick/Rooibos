@@ -91,6 +91,30 @@ def authorize_snapshot(conn: sqlite3.Connection, *, snapshot_id: str,
             raise SnapshotAccessDenied("invalid decision/current timestamp")
         if age < 0 or age > max_age_seconds:
             raise SnapshotAccessDenied("snapshot decision is stale or from the future")
+    # Exact record-to-raw-source coordinates are a core provenance check,
+    # independent of whether the consumer separately requires lifecycle state.
+    expected_evidence_links = set()
+    for record in rows:
+        index = record.source_record_index
+        if isinstance(index, bool) or not isinstance(index, int) or index < 0:
+            raise SnapshotAccessDenied("approved record has an invalid original source-record index")
+        expected_evidence_links.add((record.record_id, record.raw_response_id, index))
+    try:
+        persisted_evidence_links = {
+            (item[0], item[1], item[2])
+            for item in conn.execute(
+                "SELECT record_id, raw_response_id, source_record_index "
+                "FROM a13_snapshot_evidence_links WHERE snapshot_id=?",
+                (snapshot_id,)
+            ).fetchall()
+        }
+    except sqlite3.Error as exc:
+        raise SnapshotAccessDenied(f"snapshot source-coordinate links unavailable: {exc}") from exc
+    if persisted_evidence_links != expected_evidence_links:
+        raise SnapshotAccessDenied(
+            "persisted record-to-raw-response/source-index links differ from approved evidence"
+        )
+
     if require_lifecycle or enforce_retention:
         from .lifecycle import LifecycleError, lifecycle_state, assess_retention
         try:
@@ -99,8 +123,7 @@ def authorize_snapshot(conn: sqlite3.Connection, *, snapshot_id: str,
             raise SnapshotAccessDenied(f"snapshot lifecycle unavailable or invalid: {exc}") from exc
         if state.state != "registered":
             raise SnapshotAccessDenied(f"snapshot lifecycle state is {state.state}, not registered")
-        # Lifecycle registration is only valid when its immutable raw links
-        # exactly represent the raw evidence referenced by the approved records.
+        # Snapshot-level raw links remain a compact index for retention.
         try:
             linked_raw_ids = {
                 item[0] for item in conn.execute(
@@ -113,27 +136,6 @@ def authorize_snapshot(conn: sqlite3.Connection, *, snapshot_id: str,
         expected_raw_ids = {record.raw_response_id for record in rows}
         if None in expected_raw_ids or "" in expected_raw_ids or linked_raw_ids != expected_raw_ids:
             raise SnapshotAccessDenied("persisted raw-evidence links differ from approved snapshot records")
-        expected_evidence_links = set()
-        for record in rows:
-            index = record.source_record_index
-            if isinstance(index, bool) or not isinstance(index, int) or index < 0:
-                raise SnapshotAccessDenied("approved record has an invalid original source-record index")
-            expected_evidence_links.add((record.record_id, record.raw_response_id, index))
-        try:
-            persisted_evidence_links = {
-                (item[0], item[1], item[2])
-                for item in conn.execute(
-                    "SELECT record_id, raw_response_id, source_record_index "
-                    "FROM a13_snapshot_evidence_links WHERE snapshot_id=?",
-                    (snapshot_id,)
-                ).fetchall()
-            }
-        except sqlite3.Error as exc:
-            raise SnapshotAccessDenied(f"snapshot source-coordinate links unavailable: {exc}") from exc
-        if persisted_evidence_links != expected_evidence_links:
-            raise SnapshotAccessDenied(
-                "persisted record-to-raw-response/source-index links differ from approved evidence"
-            )
         if enforce_retention:
             try:
                 retention = assess_retention(conn, snapshot_id=snapshot_id, now=now or "")
