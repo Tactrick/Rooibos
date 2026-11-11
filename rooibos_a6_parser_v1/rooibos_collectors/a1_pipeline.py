@@ -144,6 +144,16 @@ def process_a1_raw_response(
         conn = _connect(db_path)
         try:
             inserted = store_observations(conn, observations)
+            from .record_manifest import store_record_manifest
+            source_count = observations[0].context.source_record_count
+            membership = {}
+            for item in observations:
+                membership.setdefault(item.context.source_record_index, []).append(item.observation_key)
+            store_record_manifest(
+                conn, run_id=run_id, raw_response_id=raw_response_id,
+                collector_module="A1", source_record_count=source_count,
+                membership=membership,
+            )
         finally:
             conn.close()
         framework.transition(run_id, "normalised")
