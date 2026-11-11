@@ -108,7 +108,7 @@ class A13LifecycleTests(unittest.TestCase):
         with self.assertRaises(SnapshotAccessDenied): self._gate(require_lifecycle=True)
 
     def test_withdrawal_denies_gate_and_is_append_only(self):
-        register_snapshot(self.conn,snapshot_id='snap-1',event_id='evt-1',effective_at='2026-11-09T10:01:30Z',actor_id='g',reason='publish',raw_response_ids=['raw'])
+        self._register(snapshot_id='snap-1',event_id='evt-1',effective_at='2026-11-09T10:01:30Z',actor_id='g',reason='publish',raw_response_ids=['raw'])
         withdraw_snapshot(self.conn,snapshot_id='snap-1',event_id='evt-2',effective_at='2026-11-09T10:03:00Z',actor_id='g',reason='source evidence invalidated')
         with self.assertRaises(SnapshotAccessDenied): self._gate(require_lifecycle=True)
         with self.assertRaises(sqlite3.IntegrityError): self.conn.execute("DELETE FROM a13_snapshot_lifecycle_events WHERE event_id='evt-2'")
