@@ -296,6 +296,30 @@ class CollectorFrameworkTests(unittest.TestCase):
         with self.assertRaises(InvalidRunTransition):
             self.framework.transition('run1','collecting')
 
+    def test_collector_cannot_complete_without_a_verified_a13_publication(self):
+        self.create_run()
+        self.framework.transition('run1', 'configured')
+        self.framework.transition('run1', 'collecting')
+        self.framework.transition('run1', 'raw_captured')
+        self.framework.transition('run1', 'parsed')
+        self.framework.transition('run1', 'normalised')
+        self.framework.transition('run1', 'validating')
+
+        with self.assertRaisesRegex(InvalidRunTransition, 'complete_after_a13_publication'):
+            self.framework.transition('run1', 'completed')
+
+        with self.assertRaisesRegex(InvalidRunTransition, 'GateGrant'):
+            self.framework.complete_after_a13_publication(
+                'run1', grant=object(), records=[object()],
+            )
+
+        c = sqlite3.connect(self.db)
+        self.assertEqual(
+            c.execute("SELECT status FROM collection_runs WHERE run_id='run1'").fetchone()[0],
+            'validating',
+        )
+        c.close()
+
     def test_request_cannot_be_issued_before_run_is_configured(self):
         self.create_run()
         with self.assertRaises(InvalidRunTransition):
