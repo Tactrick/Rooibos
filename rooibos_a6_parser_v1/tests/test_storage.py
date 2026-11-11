@@ -297,12 +297,11 @@ class A6StorageTests(unittest.TestCase):
                                    if candle["open_time_ms"] == 1794225600000)
         self.assertEqual(conflicting_variant["close"], 1.15)
         self.assertEqual(conflicting_variant["source_record_index"], 0)
+        canonical_id = c.execute(
+            "SELECT candle_id FROM ohlcv_candles WHERE open_time_ms=?", (1794225600000,)
+        ).fetchone()["candle_id"]
         self.assertEqual(
-            {record.raw_response_id for record in project_a6_from_storage(
-                c, canonical_id := c.execute(
-                    "SELECT candle_id FROM ohlcv_candles WHERE open_time_ms=?", (1794225600000,)
-                ).fetchone()["candle_id"]
-            )},
+            {record.raw_response_id for record in project_a6_from_storage(c, canonical_id)},
             {self.raw_id},
         )
         c.close()
