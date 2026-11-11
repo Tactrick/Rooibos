@@ -69,8 +69,13 @@ if [ -d /sys/firmware/efi ]; then printf 'Boot mode: UEFI\n'; else printf 'Boot 
 run mokutil --sb-state
 run tpm2_getcap properties-fixed
 
-section "Network overview (interface addresses and MACs omitted; routes/listeners shown)"
-run ip -brief link
+section "Network overview (interface names/states only; routes and listening sockets shown)"
+printf '\n$ ip -brief link | awk \'{print $1, $2}\'\n'
+if command -v ip >/dev/null 2>&1; then
+  ip -brief link | awk '{print $1, $2}' || printf '[interface inspection returned non-zero]\n'
+else
+  printf '[not installed / unavailable]\n'
+fi
 run ip route
 run ss -lntu
 run networkctl list --no-pager
