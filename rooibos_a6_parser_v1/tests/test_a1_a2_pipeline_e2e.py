@@ -209,5 +209,90 @@ class A1A2CollectorToA13E2ETests(unittest.TestCase):
             conn.close()
 
 
+    def test_a1_mismatched_raw_response_provenance_fails_before_persistence(self):
+        raw_id = "raw-a1-wrong-provenance"
+        run_id = self._capture("A1", {"records":[{"symbol":"TEST"}]}, raw_id)
+
+        def decode(payload, provenance):
+            return [normalize_a1(
+                DiscoveryContext(
+                    "solana", MINT, provenance.source_id, provenance.endpoint_id,
+                    provenance.run_id, "different-raw-response", 0,
+                    provenance.retrieved_at, source_record_count=1,
+                ), payload["records"][0], field_map={"symbol":"symbol"},
+            )]
+
+        with self.assertRaisesRegex(ValueError, "provenance differs"):
+            process_a1_raw_response(
+                self.framework, run_id=run_id, raw_response_id=raw_id,
+                decode_payload=decode, snapshot_id="snap-a1-wrong-provenance",
+                source_policies=POLICIES, **self._times(),
+            )
+        conn = _connect(self.db)
+        try:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM token_discovery_observations").fetchone()[0], 0)
+            self.assertEqual(conn.execute("SELECT status FROM collection_runs WHERE run_id=?", (run_id,)).fetchone()[0], "failed")
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM a13_snapshot_decisions").fetchone()[0], 0)
+        finally:
+            conn.close()
+
+    def test_a2_mismatched_raw_response_provenance_fails_before_persistence(self):
+        raw_id = "raw-a2-wrong-provenance"
+        run_id = self._capture("A2", {"records":[{"liquidity":1234.5}]}, raw_id)
+
+        def decode(payload, provenance):
+            return [MarketObservationInput(
+                chain="solana", mint_address=MINT, observed_at=provenance.retrieved_at,
+                source_id=provenance.source_id, endpoint_id=provenance.endpoint_id,
+                run_id=provenance.run_id, raw_response_id="different-raw-response",
+                source_record_index=0,
+                metrics=(MarketMetricInput("liquidity", payload["records"][0]["liquidity"]),),
+                market_scope="token_aggregated", source_record_count=1,
+            )]
+
+        with self.assertRaisesRegex(ValueError, "provenance differs"):
+            process_a2_raw_response(
+                self.framework, run_id=run_id, raw_response_id=raw_id,
+                decode_payload=decode, snapshot_id="snap-a2-wrong-provenance",
+                source_policies=POLICIES, **self._times(),
+            )
+        conn = _connect(self.db)
+        try:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM market_observations").fetchone()[0], 0)
+            self.assertEqual(conn.execute("SELECT status FROM collection_runs WHERE run_id=?", (run_id,)).fetchone()[0], "failed")
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM a13_snapshot_decisions").fetchone()[0], 0)
+        finally:
+            conn.close()
+
+    def test_a1_invalid_a13_assessment_is_quarantined_without_partial_publication(self):
+        raw_id = "raw-a1-unapproved-source"
+        run_id = self._capture("A1", {"records":[{"symbol":"TEST"}]}, raw_id)
+
+        def decode(payload, provenance):
+            return [normalize_a1(
+                DiscoveryContext(
+                    "solana", MINT, provenance.source_id, provenance.endpoint_id,
+                    provenance.run_id, provenance.raw_response_id, 0,
+                    provenance.retrieved_at, source_record_count=1,
+                ), payload["records"][0], field_map={"symbol":"symbol"},
+            )]
+
+        result = process_a1_raw_response(
+            self.framework, run_id=run_id, raw_response_id=raw_id,
+            decode_payload=decode, snapshot_id="snap-a1-unapproved-source",
+            source_policies={}, **self._times(),
+        )
+        self.assertFalse(result.published)
+        self.assertEqual(result.decision.dataset_status, "quarantined")
+        conn = _connect(self.db)
+        try:
+            self.assertEqual(conn.execute("SELECT status FROM collection_runs WHERE run_id=?", (run_id,)).fetchone()[0], "quarantined")
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM a13_snapshot_decisions WHERE snapshot_id='snap-a1-unapproved-source'").fetchone()[0], 1)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM a13_snapshot_lifecycle_events WHERE snapshot_id='snap-a1-unapproved-source'").fetchone()[0], 0)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM a13_snapshot_raw_links WHERE snapshot_id='snap-a1-unapproved-source'").fetchone()[0], 0)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM a13_snapshot_evidence_links WHERE snapshot_id='snap-a1-unapproved-source'").fetchone()[0], 0)
+        finally:
+            conn.close()
+
 if __name__ == "__main__":
     unittest.main()
