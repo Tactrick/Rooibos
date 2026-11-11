@@ -123,6 +123,38 @@ class A6CollectorToA13E2ETests(unittest.TestCase):
         finally:
             conn.close()
 
+    def test_a6_incomplete_history_is_quarantined_before_a13(self):
+        run_id, _ = self._capture("raw-a6-incomplete")
+        result = process_a6_raw_response(
+            self.framework, run_id=run_id, raw_response_id="raw-a6-incomplete",
+            parse_context=self._context(run_id, "raw-a6-incomplete"),
+            request_identity_fields={"mint_address": "mint", "interval": "interval"},
+            response_identity_fields={"mint_address": ("mint",)},
+            decode_payload=self._decode, snapshot_id="snap-a6-incomplete",
+            source_policies=POLICIES,
+            assessed_at="2026-11-11T10:01:00Z",
+            decided_at="2026-11-11T10:02:00Z",
+            effective_at="2026-11-11T10:03:00Z",
+            actor_id="synthetic-test", reason="A6 incomplete-history regression",
+            # Production default is 100 closed consecutive 15-minute candles.
+        )
+        self.assertIsNone(result.grant)
+        self.assertIsNone(result.decision)
+        self.assertEqual(len(result.candle_ids), 2)
+        conn = _connect(self.db)
+        try:
+            row = conn.execute(
+                "SELECT status, error_summary FROM collection_runs WHERE run_id=?",
+                (run_id,),
+            ).fetchone()
+            self.assertEqual(row["status"], "quarantined")
+            self.assertIn("closed=2/100", row["error_summary"])
+            self.assertEqual(conn.execute(
+                "SELECT COUNT(*) FROM a13_snapshot_decisions"
+            ).fetchone()[0], 0)
+        finally:
+            conn.close()
+
     def test_a6_publication_only_recovery_does_not_repeat_normalization(self):
         raw_id = "raw-a6-publication-recovery"
         run_id, payload = self._capture(raw_id)
