@@ -107,6 +107,8 @@ def store_observation(conn: sqlite3.Connection, obs: DiscoveryObservation, *, co
             if owns_transaction and commit:
                 conn.commit()
             return False
+        if raw["status"] == "validating":
+            raise ValueError("A1 cannot append new observations after validation has begun")
         conn.execute(
             f"""INSERT INTO token_discovery_observations ({columns})
                 VALUES ({",".join("?" for _ in values)})""",
