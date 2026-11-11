@@ -394,6 +394,27 @@ class SharedCollectorDatabaseRehearsalTests(unittest.TestCase):
             conn.close()
 
 
+    def test_disabled_endpoint_policy_rejects_run_creation(self):
+        disabled = CollectorFramework(self.db, [EndpointPolicy(
+            source_id="fixture_source", endpoint_id="fixture_endpoint",
+            endpoint_name="fixture_read", method="GET", path="/fixture/read",
+            allowed_parameter_keys=frozenset({"scope"}),
+            validated=True, enabled=False,
+        )])
+        with self.assertRaisesRegex(CollectorPolicyError, "policy is disabled"):
+            disabled.create_run(
+                run_id="disabled-endpoint-run", collector_id="A1",
+                source_id="fixture_source", endpoint_id="fixture_endpoint",
+                collector_version="1.0.0", requested_scope={"module": "A1"},
+            )
+        conn = _connect(self.db)
+        try:
+            self.assertEqual(conn.execute(
+                "SELECT COUNT(*) FROM collection_runs WHERE run_id='disabled-endpoint-run'"
+            ).fetchone()[0], 0)
+        finally:
+            conn.close()
+
     def test_fresh_database_deployment_rehearsal_quarantine_and_recovery(self):
         # setUp creates the fresh deployment database and framework. Verify
         # registrations before attempting any collection work.
