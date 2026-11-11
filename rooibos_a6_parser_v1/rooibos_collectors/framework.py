@@ -215,6 +215,40 @@ class CollectorFramework:
             if owns_connection:
                 conn.close()
 
+    def mark_publication_failure(self, run_id: str, error_summary: str) -> None:
+        """Mark only a post-normalization A13 failure as publication-retryable.
+
+        The run remains in validating state; the separate immutable-evidence
+        receipt and failure marker distinguish this from arbitrary failed runs.
+        """
+        conn = _connect(self.db_path)
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """SELECT cr.status, m.raw_response_id
+                   FROM collection_runs cr
+                   JOIN collection_record_manifests m ON m.run_id=cr.run_id
+                   WHERE cr.run_id=?""",
+                (run_id,),
+            ).fetchone()
+            if row is None or row["status"] != "validating":
+                raise InvalidRunTransition(
+                    "publication failure can be recorded only for a validating run with a source-record manifest"
+                )
+            conn.execute(
+                """UPDATE collection_runs
+                   SET publication_failed_at=COALESCE(publication_failed_at,?),
+                       publication_failure_summary=?
+                   WHERE run_id=? AND status='validating'""",
+                (datetime.now(timezone.utc).isoformat(), error_summary[:1000], run_id),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
     def authorise_request(self, run_id: str, params: Mapping[str, Any]) -> RequestTicket:
         """Create an auditable request ticket; this does not execute a network call."""
         conn = _connect(self.db_path)
