@@ -98,7 +98,7 @@ class A6CollectorToA13E2ETests(unittest.TestCase):
             assessed_at="2026-11-11T10:01:00Z",
             decided_at="2026-11-11T10:02:00Z",
             effective_at="2026-11-11T10:03:00Z",
-            actor_id="synthetic-test", reason="A6 end-to-end synthetic acceptance",
+            actor_id="synthetic-test", reason="A6 end-to-end synthetic acceptance", expected_candle_count=2,
         )
 
     def test_a6_capture_decode_persist_assess_publish_and_authorize(self):
@@ -136,7 +136,7 @@ class A6CollectorToA13E2ETests(unittest.TestCase):
             assessed_at="2026-11-11T10:01:00Z",
             decided_at="2026-11-11T10:02:00Z",
             effective_at="2026-11-11T10:03:00Z",
-            actor_id="synthetic-test", reason="A6 publication recovery acceptance",
+            actor_id="synthetic-test", reason="A6 publication recovery acceptance", expected_candle_count=2,
         )
         with patch("rooibos_collectors.a6_pipeline.publish_a6_snapshot_from_storage",
                    side_effect=RuntimeError("synthetic A13 publication outage")):
@@ -221,7 +221,7 @@ class A6CollectorToA13E2ETests(unittest.TestCase):
                     assessed_at="2026-11-11T10:01:00Z",
                     decided_at="2026-11-11T10:02:00Z",
                     effective_at="2026-11-11T10:03:00Z",
-                    actor_id="synthetic-test", reason="A6 atomic rollback regression",
+                    actor_id="synthetic-test", reason="A6 atomic rollback regression", expected_candle_count=2,
                 )
 
         conn = _connect(self.db)
