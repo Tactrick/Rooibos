@@ -114,6 +114,22 @@ def authorize_snapshot(conn: sqlite3.Connection, *, snapshot_id: str,
         raise SnapshotAccessDenied(
             "persisted record-to-raw-response/source-index links differ from approved evidence"
         )
+    # Do not trust the link table alone: independently bind each approved
+    # record's run/source/endpoint identity to the immutable raw response row.
+    try:
+        for record in rows:
+            raw = conn.execute(
+                "SELECT run_id, source_id, endpoint_id FROM raw_responses WHERE raw_response_id=?",
+                (record.raw_response_id,),
+            ).fetchone()
+            if raw is None or (
+                raw["run_id"], raw["source_id"], raw["endpoint_id"]
+            ) != (record.run_id, record.source_id, record.endpoint_id):
+                raise SnapshotAccessDenied(
+                    "record run/source/endpoint provenance differs from its persisted raw response"
+                )
+    except sqlite3.Error as exc:
+        raise SnapshotAccessDenied(f"raw-response provenance unavailable: {exc}") from exc
 
     if require_lifecycle or enforce_retention:
         from .lifecycle import LifecycleError, lifecycle_state, assess_retention
