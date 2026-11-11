@@ -7,6 +7,7 @@ It performs no network I/O and cannot invoke trading or wallet operations.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 import sqlite3
@@ -193,6 +194,13 @@ def process_a6_raw_response(
 
         conn = _connect(db_path)
         try:
+            # Hold the run's write lock across A13 publication and completion.
+            conn.execute("BEGIN IMMEDIATE")
+            run_state = conn.execute(
+                "SELECT status FROM collection_runs WHERE run_id=?", (run_id,)
+            ).fetchone()
+            if run_state is None or run_state["status"] != "validating":
+                raise ValueError("A13 publication requires a run still in validating state")
             records_a13, assessments, decision, grant = publish_a6_snapshot_from_storage(
                 conn, candle_ids, snapshot_id=snapshot_id,
                 source_policies=source_policies, assessed_at=assessed_at,
@@ -201,18 +209,24 @@ def process_a6_raw_response(
                 allow_warnings=allow_warnings,
                 expected_record_ids=expected_record_ids,
             )
+            if grant is None:
+                conn.execute(
+                    """UPDATE collection_runs
+                       SET status='quarantined', completed_at=?, error_summary=?
+                       WHERE run_id=? AND status='validating'""",
+                    (datetime.now(timezone.utc).isoformat(),
+                     f"A13 decision quarantined snapshot: {decision.dataset_status}", run_id),
+                )
+            else:
+                framework.complete_after_a13_publication(
+                    run_id, grant=grant, records=records_a13, connection=conn,
+                )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             conn.close()
-
-        if grant is None:
-            framework.transition(
-                run_id, "quarantined",
-                error_summary=f"A13 decision quarantined snapshot: {decision.dataset_status}",
-            )
-        else:
-            framework.complete_after_a13_publication(
-                run_id, grant=grant, records=records_a13,
-            )
         return A6PipelineResult(
             parsed, stored, candle_ids, tuple(assessments), decision, grant,
         )
