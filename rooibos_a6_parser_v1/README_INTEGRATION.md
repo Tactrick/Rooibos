@@ -30,6 +30,7 @@
 - 008: append-only A13 lifecycle, retention governance and raw-response links.
 - 009: preserve every A6 candle-to-raw-response/source-record relationship, including backfill of existing candles.
 - 010: bind every A13 evidence record to exact raw-response/source-record coordinates.
+- 011: persist immutable collection-run source-record membership receipts and publication-failure recovery markers.
 - Runner checksum-checks all applied migrations and refuses checksum drift.
 
 ## Verification
@@ -41,7 +42,7 @@ python -m unittest discover -s tests -v
 python -m compileall -q rooibos_collectors rooibos_a1 rooibos_a2 rooibos_a6 rooibos_a13 rooibos_db rooibos_integrations
 ```
 
-No provider-specific Moby adapters, endpoint approvals, network client, credentials, Chart Engine wiring, agent runtime wiring, or trading capabilities are included. A6 MET fixture mapping remains blocked pending genuine fixture evidence. A13's production source policy registry remains unconfigured. This is a tested integration seam, not end-to-end production acceptance.
+An explicit-schema Moby parallel-array OHLCV decoder is included, but its response envelope, field names, timestamp unit, volume denomination and candle-status mapping remain unconfigured pending genuine fixture evidence. No endpoint approvals, network client, credentials, Chart Engine wiring, agent runtime wiring, or trading capabilities are enabled. A13's production source policy registry remains unconfigured. This is a tested integration seam, not end-to-end production acceptance.
 
 ## Chart Engine gated reader (v1.5.0)
 
