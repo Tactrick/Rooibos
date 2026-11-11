@@ -37,8 +37,8 @@ def snapshot_content_hash(records: Iterable[EvidenceRecord]) -> str:
         {"record_id": r.record_id, "dataset_type": r.dataset_type,
          "chain": r.chain, "mint": r.mint, "source_id": r.source_id,
          "endpoint_id": r.endpoint_id, "run_id": r.run_id,
-         "raw_response_id": r.raw_response_id, "observed_at": r.observed_at,
-         "normalization_version": r.normalization_version,
+         "raw_response_id": r.raw_response_id, "source_record_index": r.source_record_index,
+         "observed_at": r.observed_at, "normalization_version": r.normalization_version,
          "content_hash": r.content_hash}
         for r in ordered
     ])
