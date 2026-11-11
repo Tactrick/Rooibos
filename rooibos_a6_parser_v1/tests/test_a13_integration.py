@@ -122,6 +122,23 @@ class A13PipelineIntegrationTests(unittest.TestCase):
         bad = normalize_a1(bad_ctx, {'symbol':'SOL'}, field_map={'symbol':'symbol'})
         with self.assertRaises(ValueError):
             store_a1_observation(self.conn, bad)
+
+        # A completed run is immutable: a late direct storage call must not
+        # append evidence after its A13 publication boundary.
+        self.conn.execute(
+            "UPDATE collection_runs SET status='completed' WHERE run_id=?",
+            ("run-a1-store",),
+        )
+        late_ctx = DiscoveryContext(
+            'solana', MINT, 'fixture_source', 'fixture_endpoint',
+            'run-a1-store', 'raw-a1-store', 1, '2026-11-09T10:00:02Z'
+        )
+        late_obs = normalize_a1(
+            late_ctx, {'symbol':'LATE'}, field_map={'symbol':'symbol'}
+        )
+        with self.assertRaisesRegex(ValueError, "non-terminal captured collection run"):
+            store_a1_observation(self.conn, late_obs)
+
         count = self.conn.execute('SELECT COUNT(*) FROM token_discovery_observations').fetchone()[0]
         self.assertEqual(count, 1)
 
