@@ -24,7 +24,7 @@ class Migration001Tests(unittest.TestCase):
         conn = _connect(self.db)
         try:
             version = conn.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
-            self.assertEqual(version, 9)
+            self.assertEqual(version, 10)
             indexes = {r[0] for r in conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='index'"
             )}
@@ -33,7 +33,7 @@ class Migration001Tests(unittest.TestCase):
                 "SELECT name FROM sqlite_master WHERE type='table'"
             )}
             for required in ("sources", "collectors", "collection_runs", "raw_responses",
-                             "ohlcv_candles", "a6_candle_evidence_links", "validation_runs", "research_snapshots", "market_observations", "market_observation_comparisons"):
+                             "ohlcv_candles", "a6_candle_evidence_links", "a13_snapshot_evidence_links", "validation_runs", "research_snapshots", "market_observations", "market_observation_comparisons"):
                 self.assertIn(required, tables)
         finally:
             conn.close()
@@ -45,7 +45,7 @@ class Migration001Tests(unittest.TestCase):
         try:
             self.assertEqual(conn.execute(
                 "SELECT COUNT(*) FROM schema_migrations"
-            ).fetchone()[0], 9)
+            ).fetchone()[0], 10)
         finally:
             conn.close()
 
@@ -126,12 +126,12 @@ class Migration001Tests(unittest.TestCase):
                 THIS IS NOT VALID SQL;
             """
             with self.assertRaises(sqlite3.OperationalError):
-                apply_migrations(conn, [(10, "Injected failure test", broken_sql)])
+                apply_migrations(conn, [(11, "Injected failure test", broken_sql)])
             self.assertIsNone(conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='should_rollback'"
             ).fetchone())
             self.assertIsNone(conn.execute(
-                "SELECT version FROM schema_migrations WHERE version=10"
+                "SELECT version FROM schema_migrations WHERE version=11"
             ).fetchone())
         finally:
             conn.close()
