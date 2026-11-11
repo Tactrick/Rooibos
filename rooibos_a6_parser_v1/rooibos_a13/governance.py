@@ -11,11 +11,16 @@ def decide_snapshot(snapshot_id: str, dataset_type: str, assessments: list[Recor
     if len(ids) != len(set(ids)):
         raise A13ValidationError("duplicate record IDs in snapshot input")
     conflicts = conflict_record_ids or set()
-    expected = expected_record_ids or set(ids)
+    expected = set(ids) if expected_record_ids is None else set(expected_record_ids)
     findings = []
     missing = expected - set(ids)
+    unexpected = set(ids) - expected if expected_record_ids is not None else set()
     if missing:
         findings.append(Finding("snapshot_incomplete", "error", f"{len(missing)} expected records have no assessment."))
+    if unexpected:
+        findings.append(Finding("snapshot_unexpected_membership", "error", f"{len(unexpected)} assessed record(s) were not in the expected snapshot membership."))
+    if expected_record_ids is not None and not expected:
+        findings.append(Finding("snapshot_empty_expected_membership", "error", "An explicitly supplied expected snapshot membership cannot be empty."))
     if conflicts:
         findings.append(Finding("source_conflict", "error", f"{len(conflicts)} record(s) are flagged as conflicting; preserve and quarantine rather than blend."))
     if any(a.status in ("rejected", "incomplete", "duplicate", "conflicting") for a in assessments):
