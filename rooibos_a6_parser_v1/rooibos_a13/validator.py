@@ -62,12 +62,21 @@ def assess_record(record: EvidenceRecord, source_policies: Mapping[str, SourcePo
         if "symbol" not in p and "name" not in p:
             warnings.append(_finding("a1_sparse_metadata", "warning", "Discovery has no symbol or name; token identity remains the chain and mint."))
     elif record.dataset_type == "a2_market":
+        from rooibos_a2.normalizer import METRIC_UNITS
         required = ("metric", "unit", "measurement_kind", "market_scope")
         for key in required:
             if key not in p or p[key] is None:
                 errors.append(_finding("a2_missing_" + key, "error", f"A2 market observation requires {key}."))
-        if p.get("measurement_kind") not in (None, "observed", "estimated", "unknown"):
+        metric = p.get("metric")
+        expected_unit = METRIC_UNITS.get(metric) if isinstance(metric, str) else None
+        if expected_unit is None:
+            errors.append(_finding("a2_unknown_metric", "error", "A2 metric is not present in the versioned metric registry."))
+        elif p.get("unit") != expected_unit:
+            errors.append(_finding("a2_metric_unit_mismatch", "error", "A2 unit does not match the registered metric unit."))
+        if p.get("measurement_kind") not in ("observed", "estimated", "unknown"):
             errors.append(_finding("a2_invalid_measurement_kind", "error", "A2 measurement_kind is not recognized."))
+        if p.get("market_scope") not in ("token_aggregated", "pool_specific", "unknown"):
+            errors.append(_finding("a2_invalid_market_scope", "error", "A2 market_scope is not recognized."))
         value_status = p.get("value_status", "present")
         if "value" not in p:
             errors.append(_finding("a2_missing_value", "error", "A2 market observation must carry a value or explicit missingness."))
@@ -75,18 +84,25 @@ def assess_record(record: EvidenceRecord, source_policies: Mapping[str, SourcePo
             errors.append(_finding("a2_invalid_value_status", "error", "A2 value_status is not recognized."))
         value = p.get("value")
         if value_status == "present":
-            if isinstance(value, bool) or not isinstance(value, (int, float, str)):
-                errors.append(_finding("a2_invalid_value", "error", "Present A2 values must be numeric or text according to the metric registry."))
-            if isinstance(value, str) and p.get("unit") not in ("text", "address"):
-                errors.append(_finding("a2_text_value_unit_mismatch", "error", "Text A2 values require a text or address unit."))
-            if isinstance(value, (int, float)) and not isinstance(value, bool) and p.get("unit") in ("text", "address"):
-                errors.append(_finding("a2_numeric_value_unit_mismatch", "error", "Text/address A2 units cannot carry numeric values."))
+            if expected_unit in ("text", "address"):
+                if not isinstance(value, str) or not value.strip():
+                    errors.append(_finding("a2_invalid_text_value", "error", "Registered text/address metrics require non-empty text."))
+            else:
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+                    errors.append(_finding("a2_invalid_numeric_value", "error", "Registered numeric metrics require finite numeric values."))
+                elif float(value) < 0:
+                    errors.append(_finding("a2_negative_value", "error", "A2 market metrics cannot be negative."))
+                elif metric == "price" and float(value) <= 0:
+                    errors.append(_finding("a2_nonpositive_price", "error", "A2 token price must be positive."))
         elif value is not None:
             errors.append(_finding("a2_missingness_value_mismatch", "error", "Non-present A2 values must be NULL while preserving their explicit status."))
+        window = p.get("window_seconds")
+        if window is not None and (isinstance(window, bool) or not isinstance(window, int) or window <= 0):
+            errors.append(_finding("a2_invalid_window", "error", "A2 measurement window must be a positive integer number of seconds."))
         if p.get("measurement_kind") == "unknown" and value is not None:
             warnings.append(_finding("a2_unknown_with_value", "warning", "Unknown measurement kind has a value; review semantics."))
-        if p.get("market_scope") == "pool_specific" and not p.get("market_id"):
-            errors.append(_finding("a2_pool_without_market", "error", "Pool-specific observations require a market/pool identity."))
+        if p.get("market_scope") == "pool_specific" and not (p.get("market_id") or p.get("pool_address")):
+            errors.append(_finding("a2_pool_without_market", "error", "Pool-specific observations require a market or pool identity."))
     elif record.dataset_type == "a6_ohlcv":
         required = ("open_time_ms", "open", "high", "low", "close", "volume", "interval_ms", "candle_status")
         for key in required:
