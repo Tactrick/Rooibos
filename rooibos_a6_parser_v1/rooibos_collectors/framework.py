@@ -248,14 +248,17 @@ class CollectorFramework:
                 WHERE r.request_id=?""", (ticket.request_id,)).fetchone()
             if not request or request["run_id"] != ticket.run_id or request["endpoint_id"] != ticket.endpoint_id:
                 raise CollectorPolicyError("Request ticket provenance is invalid")
-            if request["run_status"] != "collecting":
-                raise InvalidRunTransition("A response can only be captured while the run is collecting")
             request_params = json.loads(request["request_params_json"])
             source_id = request["source_id"]
-            already_captured = conn.execute(
-                "SELECT 1 FROM raw_responses WHERE raw_response_id=?",
+            existing = conn.execute(
+                """SELECT request_id FROM raw_responses WHERE raw_response_id=?""",
                 (raw_response_id,),
-            ).fetchone() is not None
+            ).fetchone()
+            already_captured = existing is not None
+            if already_captured and existing["request_id"] != ticket.request_id:
+                raise CollectorPolicyError("Raw response ID is already bound to a different request")
+            if request["run_status"] != "collecting" and not already_captured:
+                raise InvalidRunTransition("A new response can only be captured while the run is collecting")
         finally:
             conn.close()
         raw_hash = store_raw_response(
