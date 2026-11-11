@@ -171,6 +171,14 @@ class A13PipelineIntegrationTests(unittest.TestCase):
         obs = normalize_a1(ctx, {'symbol':'SOL'}, field_map={'symbol':'symbol'})
         self.assertTrue(store_a1_observation(self.conn, obs))
         self.assertFalse(store_a1_observation(self.conn, obs))
+        tampered_raw = replace(obs, raw_record={"symbol": "ALTERED"})
+        with self.assertRaisesRegex(ValueError, "raw-record content hash"):
+            store_a1_observation(self.conn, tampered_raw)
+        tampered_identity = replace(
+            obs, context=replace(ctx, source_record_index=1)
+        )
+        with self.assertRaisesRegex(ValueError, "observation key"):
+            store_a1_observation(self.conn, tampered_identity)
         bad_ctx = DiscoveryContext('solana', MINT, 'other_source', 'fixture_endpoint', 'run-a1-store', 'raw-a1-store', 0, '2026-11-09T10:00:01Z')
         bad = normalize_a1(bad_ctx, {'symbol':'SOL'}, field_map={'symbol':'symbol'})
         with self.assertRaises(ValueError):
