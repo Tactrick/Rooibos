@@ -11,6 +11,7 @@ from rooibos_a13.lifecycle import apply_migration_008, register_snapshot_for_rec
 class ChartEngineGateTests(unittest.TestCase):
     def setUp(self):
         self.conn = sqlite3.connect(':memory:')
+        self.conn.row_factory = sqlite3.Row
         self.conn.execute('''CREATE TABLE a13_snapshot_decisions (
             snapshot_id TEXT PRIMARY KEY, dataset_type TEXT, record_ids_json TEXT,
             dataset_status TEXT, assessments_hash TEXT, findings_json TEXT,
@@ -36,8 +37,13 @@ class ChartEngineGateTests(unittest.TestCase):
             'approved_for_research', self.assessments_hash, '[]',
             '2026-11-09T10:01:00+00:00', 'a13-governance/0.1.0', self.snapshot_hash))
         self.conn.commit()
-        self.conn.execute('CREATE TABLE raw_responses (raw_response_id TEXT PRIMARY KEY)')
-        for i in range(3): self.conn.execute('INSERT INTO raw_responses VALUES (?)', (f'raw-{i}',))
+        self.conn.execute('''CREATE TABLE raw_responses (
+            raw_response_id TEXT PRIMARY KEY, run_id TEXT, source_id TEXT, endpoint_id TEXT)''')
+        for i in range(3):
+            self.conn.execute(
+                'INSERT INTO raw_responses VALUES (?,?,?,?)',
+                (f'raw-{i}', 'run-1', 'provider-a', 'ohlcv'),
+            )
         apply_migration_008(self.conn)
         self.conn.execute("""CREATE TABLE a13_snapshot_evidence_links (
             snapshot_id TEXT NOT NULL, record_id TEXT NOT NULL, raw_response_id TEXT NOT NULL,
