@@ -271,7 +271,7 @@ def process_a6_raw_response(
             conn = _connect(db_path)
             try:
                 row = conn.execute(
-                    "SELECT status FROM collection_runs WHERE run_id=?", (run_id,)
+                    "SELECT status, publication_failed_at FROM collection_runs WHERE run_id=?", (run_id,)
                 ).fetchone()
             finally:
                 conn.close()
