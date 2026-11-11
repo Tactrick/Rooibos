@@ -320,6 +320,61 @@ class A1A2CollectorToA13E2ETests(unittest.TestCase):
         finally:
             conn.close()
 
+    def test_a2_publication_only_recovery_reuses_persisted_metrics(self):
+        raw_id = "raw-a2-publication-recovery"
+        run_id = self._capture("A2", {"records":[{"liquidity":987.6}]}, raw_id)
+
+        def decode(payload, provenance):
+            return [MarketObservationInput(
+                chain="solana", mint_address=MINT, observed_at=provenance.retrieved_at,
+                source_id=provenance.source_id, endpoint_id=provenance.endpoint_id,
+                run_id=provenance.run_id, raw_response_id=provenance.raw_response_id,
+                source_record_index=index,
+                metrics=(MarketMetricInput("liquidity", row["liquidity"]),),
+                market_scope="token_aggregated", source_record_count=len(payload["records"]),
+            ) for index, row in enumerate(payload["records"])]
+
+        with patch("rooibos_collectors.a2_pipeline.publish_a2_snapshot_from_storage",
+                   side_effect=RuntimeError("synthetic A13 publication outage")):
+            with self.assertRaisesRegex(RuntimeError, "publication outage"):
+                process_a2_raw_response(
+                    self.framework, run_id=run_id, raw_response_id=raw_id,
+                    decode_payload=decode, snapshot_id="snap-a2-recovery",
+                    source_policies=POLICIES, **self._times(),
+                )
+
+        conn = _connect(self.db)
+        try:
+            before = conn.execute(
+                "SELECT COUNT(*) FROM market_observations WHERE run_id=?", (run_id,)
+            ).fetchone()[0]
+            self.assertEqual(before, 1)
+            self.assertEqual(conn.execute(
+                "SELECT status FROM collection_runs WHERE run_id=?", (run_id,)
+            ).fetchone()[0], "validating")
+            self.assertIsNotNone(conn.execute(
+                "SELECT publication_failed_at FROM collection_runs WHERE run_id=?", (run_id,)
+            ).fetchone()[0])
+        finally:
+            conn.close()
+
+        recovered = recover_a13_publication(
+            self.framework, run_id=run_id, raw_response_id=raw_id,
+            snapshot_id="snap-a2-recovery", source_policies=POLICIES,
+            **self._times(),
+        )
+        self.assertTrue(recovered["published"])
+        conn = _connect(self.db)
+        try:
+            self.assertEqual(conn.execute(
+                "SELECT COUNT(*) FROM market_observations WHERE run_id=?", (run_id,)
+            ).fetchone()[0], before)
+            self.assertEqual(conn.execute(
+                "SELECT status FROM collection_runs WHERE run_id=?", (run_id,)
+            ).fetchone()[0], "completed")
+        finally:
+            conn.close()
+
     def test_a2_publication_and_completion_share_one_rollback_boundary(self):
         raw_id = "raw-a2-atomic-completion"
         run_id = self._capture("A2", {"records":[{"liquidity":1234.5}]}, raw_id)
