@@ -154,7 +154,10 @@ class A6CollectorToA13E2ETests(unittest.TestCase):
         try:
             self.assertEqual(conn.execute(
                 "SELECT status FROM collection_runs WHERE run_id=?", (run_id,)
-            ).fetchone()[0], "failed")
+            ).fetchone()[0], "validating")
+            self.assertIsNotNone(conn.execute(
+                "SELECT publication_failed_at FROM collection_runs WHERE run_id=?", (run_id,)
+            ).fetchone()[0])
             for table in (
                 "a13_record_assessments", "a13_snapshot_decisions",
                 "a13_snapshot_lifecycle_events", "a13_snapshot_evidence_links",
