@@ -14,12 +14,14 @@ def _canonical_membership(source_record_count: int, membership: Mapping[int, Seq
     if set(membership) != expected:
         raise ValueError("manifest must cover every original source-record index exactly once")
     normalized = {}
+    seen_record_ids = set()
     for index in range(source_record_count):
         ids = list(membership[index])
         if any(not isinstance(value, str) or not value for value in ids):
             raise ValueError("manifest record IDs must be non-empty strings")
-        if len(ids) != len(set(ids)):
-            raise ValueError("manifest contains duplicate normalized record IDs")
+        if len(ids) != len(set(ids)) or seen_record_ids.intersection(ids):
+            raise ValueError("manifest contains duplicate normalized record IDs across source indexes")
+        seen_record_ids.update(ids)
         normalized[str(index)] = sorted(ids)
     return json.dumps(normalized, sort_keys=True, separators=(",", ":"))
 
