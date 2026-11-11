@@ -107,6 +107,13 @@ def persist_parse_result(
     parser_conflicted_timestamps = {
         c.open_time_ms for c in result.candles if c.source_record_index in parser_conflict_indices
     }
+    # A6's provider record index identifies one source record in one immutable
+    # response. It must not be reused to manufacture multiple candle records.
+    source_indices = [c.source_record_index for c in result.candles]
+    if any(isinstance(index, bool) or not isinstance(index, int) or index < 0 for index in source_indices):
+        raise ValueError("Every A6 candle requires a non-negative integer source_record_index")
+    if len(set(source_indices)) != len(source_indices):
+        raise ValueError("A6 source_record_index must be unique within a raw response")
 
     conn = _connect(db_path)
     try:
@@ -129,6 +136,22 @@ def persist_parse_result(
                 raise ValueError("Candle provenance does not match raw response run/source/endpoint")
             if candle.open_time_ms in parser_conflicted_timestamps:
                 continue
+            # Validate asset and market identity before either the insert or
+            # identical-candle replay path. Previously the latter could attach
+            # evidence while bypassing these checks.
+            asset = conn.execute(
+                "SELECT asset_id FROM assets WHERE chain=? AND token_address=?",
+                (candle.chain,candle.mint_address),
+            ).fetchone()
+            if not asset:
+                raise ValueError(f"Asset is not registered: {candle.chain}/{candle.mint_address}")
+            if asset["asset_id"] != candle.asset_id:
+                raise ValueError("ParseContext asset_id does not match the registered chain/mint identity")
+            if candle.market_id is not None and not conn.execute(
+                "SELECT 1 FROM markets WHERE market_id=? AND asset_id=?",
+                (candle.market_id,asset["asset_id"]),
+            ).fetchone():
+                raise ValueError("Market identity is not registered for this asset")
             identity = (
                 candle.chain, candle.mint_address, candle.market_id, candle.interval,
                 candle.open_time_ms, candle.source_id, candle.normalisation_version,
@@ -143,6 +166,15 @@ def persist_parse_result(
             if existing:
                 old = tuple(existing[k] for k in ("open","high","low","close","volume","candle_status","volume_unit"))
                 if old == values:
+                    # The same source-record index cannot support a different
+                    # canonical candle within this immutable raw response.
+                    reused = conn.execute(
+                        "SELECT candle_id FROM a6_candle_evidence_links "
+                        "WHERE raw_response_id=? AND source_record_index=? AND candle_id<>?",
+                        (raw_response_id,candle.source_record_index,existing["candle_id"]),
+                    ).fetchone()
+                    if reused:
+                        raise ValueError("A6 source_record_index is already linked to a different candle in this raw response")
                     # Preserve every raw observation that independently confirms this
                     # canonical candle. The candle row remains deduplicated.
                     conn.execute("""
@@ -158,19 +190,14 @@ def persist_parse_result(
                     storage_conflicts += 1
                     conflicted_identity_keys.add(identity)
                 continue
-            asset = conn.execute(
-                "SELECT asset_id FROM assets WHERE chain=? AND token_address=?",
-                (candle.chain,candle.mint_address),
-            ).fetchone()
-            if not asset:
-                raise ValueError(f"Asset is not registered: {candle.chain}/{candle.mint_address}")
-            if asset["asset_id"] != candle.asset_id:
-                raise ValueError("ParseContext asset_id does not match the registered chain/mint identity")
-            if candle.market_id is not None and not conn.execute(
-                "SELECT 1 FROM markets WHERE market_id=? AND asset_id=?", (candle.market_id,asset["asset_id"])
-            ).fetchone():
-                raise ValueError("Market identity is not registered for this asset")
             candle_id = _sha256(_json(identity))
+            reused = conn.execute(
+                "SELECT candle_id FROM a6_candle_evidence_links "
+                "WHERE raw_response_id=? AND source_record_index=? AND candle_id<>?",
+                (raw_response_id,candle.source_record_index,candle_id),
+            ).fetchone()
+            if reused:
+                raise ValueError("A6 source_record_index is already linked to a different candle in this raw response")
             conn.execute("""
                 INSERT INTO ohlcv_candles(
                     candle_id,asset_id,market_id,interval,open_time_ms,source_id,normalization_version,
