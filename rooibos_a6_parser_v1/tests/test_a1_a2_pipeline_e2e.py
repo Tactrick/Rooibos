@@ -13,6 +13,7 @@ from rooibos_db.database import initialize_database, _connect
 from rooibos_collectors import CollectorFramework, EndpointPolicy
 from rooibos_collectors.a1_pipeline import process_a1_raw_response
 from rooibos_collectors.a2_pipeline import process_a2_raw_response
+from rooibos_collectors.publication_recovery import recover_a13_publication
 from rooibos_a1.models import DiscoveryContext, normalize_observation as normalize_a1
 from rooibos_a1.storage import store_observations
 from rooibos_a2.normalizer import MarketMetricInput, MarketObservationInput, normalize_observation as normalize_a2
@@ -153,6 +154,70 @@ class A1A2CollectorToA13E2ETests(unittest.TestCase):
             ).fetchone()[0], 1)
         finally:
             conn.close()
+
+    def test_a1_publication_only_recovery_reuses_persisted_observations(self):
+        raw_id = "raw-a1-publication-recovery"
+        run_id = self._capture("A1", {"records":[{"symbol":"RECOVER"}]}, raw_id)
+
+        def decode(payload, provenance):
+            return [normalize_a1(
+                DiscoveryContext(
+                    "solana", MINT, provenance.source_id, provenance.endpoint_id,
+                    provenance.run_id, provenance.raw_response_id, index,
+                    provenance.retrieved_at, source_record_count=len(payload["records"]),
+                ),
+                row, field_map={"symbol":"symbol"},
+            ) for index, row in enumerate(payload["records"])]
+
+        with patch("rooibos_collectors.a1_pipeline.publish_a1_snapshot_from_storage",
+                   side_effect=RuntimeError("synthetic A13 publication outage")):
+            with self.assertRaisesRegex(RuntimeError, "publication outage"):
+                process_a1_raw_response(
+                    self.framework, run_id=run_id, raw_response_id=raw_id,
+                    decode_payload=decode, snapshot_id="snap-a1-recovery",
+                    source_policies=POLICIES, **self._times(),
+                )
+
+        conn = _connect(self.db)
+        try:
+            before = conn.execute(
+                "SELECT COUNT(*) FROM token_discovery_observations WHERE run_id=?", (run_id,)
+            ).fetchone()[0]
+            self.assertEqual(before, 1)
+            self.assertEqual(conn.execute(
+                "SELECT status FROM collection_runs WHERE run_id=?", (run_id,)
+            ).fetchone()[0], "validating")
+            self.assertIsNotNone(conn.execute(
+                "SELECT publication_failed_at FROM collection_runs WHERE run_id=?", (run_id,)
+            ).fetchone()[0])
+            self.assertEqual(conn.execute(
+                "SELECT COUNT(*) FROM a13_record_assessments"
+            ).fetchone()[0], 0)
+        finally:
+            conn.close()
+
+        recovered = recover_a13_publication(
+            self.framework, run_id=run_id, raw_response_id=raw_id,
+            snapshot_id="snap-a1-recovery", source_policies=POLICIES,
+            **self._times(),
+        )
+        self.assertTrue(recovered["published"])
+        conn = _connect(self.db)
+        try:
+            self.assertEqual(conn.execute(
+                "SELECT COUNT(*) FROM token_discovery_observations WHERE run_id=?", (run_id,)
+            ).fetchone()[0], before)
+            self.assertEqual(conn.execute(
+                "SELECT status FROM collection_runs WHERE run_id=?", (run_id,)
+            ).fetchone()[0], "completed")
+        finally:
+            conn.close()
+        with self.assertRaisesRegex(ValueError, "only a run explicitly marked"):
+            recover_a13_publication(
+                self.framework, run_id=run_id, raw_response_id=raw_id,
+                snapshot_id="snap-a1-recovery-again", source_policies=POLICIES,
+                **self._times(),
+            )
 
     def test_a1_publication_and_completion_share_one_rollback_boundary(self):
         raw_id = "raw-a1-atomic-completion"
