@@ -114,8 +114,9 @@ for all three data families:
 A1, A2 and A6 publication now share the same A13 transaction boundary:
 assessment, decision, raw-evidence links, lifecycle registration and final
 read-gate verification. The lifecycle registrar and read gate independently
-bind each evidence record's run/source/endpoint identity to the immutable raw
-response row, in addition to checking exact raw-response/source-index links.
+bind each evidence record's run/source/endpoint identity to both the immutable
+raw-response row and its owning collection-run metadata, in addition to
+checking exact raw-response/source-index links.
 A quarantined decision remains auditable but is not registered or exposed to
 consumers. Parser/normalizer errors and provenance mismatches fail the run closed.
 
@@ -136,7 +137,10 @@ No Moby endpoint mapping, live network adapter, credential handling, or
 production source policy is enabled. Synthetic end-to-end regression tests now
 cover A1 and A2 capture, decoding, complete source-record coverage, provenance
 binding, persistence, A13 assessment/publication and successful run completion.
-A1 and A2 incomplete-source coverage is tested to fail before persistence or
-publication. A6 has corresponding full-path publication and quarantine tests.
-These are synthetic acceptance results only; genuine provider fixtures, source
-mapping approval and deployment acceptance remain outstanding.
+A1 and A2 incomplete-source coverage and mismatched raw-response provenance are
+tested to fail before persistence/publication. Both pipelines also have tests
+showing invalid A13 source assessments are quarantined without lifecycle or raw
+evidence publication links. A6 has corresponding full-path publication,
+identity, source-coverage, quarantine and rollback tests. These are synthetic
+acceptance results only; genuine provider fixtures, source mapping approval and
+deployment acceptance remain outstanding.
