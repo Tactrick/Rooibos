@@ -152,7 +152,7 @@ def process_a2_raw_response(
         stored = persist_a2_result(db_path, result=result)
         if inputs:
             from .record_manifest import store_record_manifest
-            membership = {}
+            membership = {i: [] for i in range(inputs[0].source_record_count)}
             for item in result.observations:
                 membership.setdefault(item.source_record_index, []).append(item.observation_id)
             manifest_conn = _connect(db_path)
