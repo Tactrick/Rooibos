@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
@@ -176,7 +177,7 @@ def process_a2_raw_response(
                     """UPDATE collection_runs
                        SET status='quarantined', completed_at=?, error_summary=?
                        WHERE run_id=? AND status='validating'""",
-                    (__import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+                    (datetime.now(timezone.utc).isoformat(),
                      f"A13 decision quarantined snapshot: {decision.dataset_status}", run_id),
                 )
             else:
