@@ -140,14 +140,16 @@ def _append_event(conn: sqlite3.Connection, *, event_id: str, snapshot_id: str,
 
 def register_snapshot(conn: sqlite3.Connection, *, snapshot_id: str, event_id: str,
                       effective_at: str, actor_id: str, reason: str,
-                      raw_response_ids: Iterable[str] = ()) -> None:
+                      raw_response_ids: Iterable[str] = (), commit: bool = True) -> None:
     decision = conn.execute("SELECT dataset_status FROM a13_snapshot_decisions WHERE snapshot_id=?", (snapshot_id,)).fetchone()
     if decision is None or decision[0] not in ("approved_for_research", "approved_with_warnings"):
         raise LifecycleError("only a persisted A13-approved snapshot can be registered")
     raw_ids = sorted(set(raw_response_ids))
     if not raw_ids:
         raise LifecycleError("at least one linked raw response is required to publish a snapshot")
-    conn.execute("BEGIN IMMEDIATE")
+    owns_transaction = not conn.in_transaction
+    if commit and owns_transaction:
+        conn.execute("BEGIN IMMEDIATE")
     try:
         _append_event(conn,event_id=event_id,snapshot_id=snapshot_id,event_type="registered",effective_at=effective_at,
                       actor_id=actor_id,reason=reason)
@@ -156,50 +158,101 @@ def register_snapshot(conn: sqlite3.Connection, *, snapshot_id: str, event_id: s
             if conn.execute("SELECT 1 FROM raw_responses WHERE raw_response_id=?", (raw_id,)).fetchone() is None:
                 raise LifecycleError(f"raw response {raw_id!r} does not exist")
             conn.execute("INSERT INTO a13_snapshot_raw_links VALUES (?,?,?)",(snapshot_id,raw_id,effective_at))
-        conn.commit()
+        if commit and owns_transaction:
+            conn.commit()
     except Exception:
-        conn.rollback(); raise
+        if commit and owns_transaction:
+            conn.rollback()
+        raise
 
 
 
 def register_snapshot_for_records(conn: sqlite3.Connection, *, snapshot_id: str, event_id: str,
-                                  effective_at: str, actor_id: str, reason: str, records) -> None:
-    decision = conn.execute("SELECT record_ids_json FROM a13_snapshot_decisions WHERE snapshot_id=?", (snapshot_id,)).fetchone()
-    if decision is None: raise LifecycleError("snapshot decision does not exist")
+                                  effective_at: str, actor_id: str, reason: str, records,
+                                  commit: bool = True) -> None:
+    decision = conn.execute(
+        "SELECT dataset_type, record_ids_json, dataset_status, snapshot_content_hash "
+        "FROM a13_snapshot_decisions WHERE snapshot_id=?", (snapshot_id,)
+    ).fetchone()
+    if decision is None:
+        raise LifecycleError("snapshot decision does not exist")
+    dataset_type, record_ids_json, status, approved_hash = decision
+    if status not in ("approved_for_research", "approved_with_warnings"):
+        raise LifecycleError("only an approved snapshot can be published")
     records = list(records)
-    expected = set(json.loads(decision[0]))
+    expected = set(json.loads(record_ids_json))
     supplied = {record.record_id for record in records}
-    if expected != supplied or not supplied:
+    if expected != supplied or not supplied or len(supplied) != len(records):
         raise LifecycleError("records supplied for publication do not match approved snapshot membership")
+    if any(record.dataset_type != dataset_type for record in records):
+        raise LifecycleError("record dataset type differs from approved snapshot")
+    # Import locally to avoid a module-level lifecycle/read-gate import cycle.
+    from .read_gate import snapshot_content_hash
+    if not approved_hash or snapshot_content_hash(records) != approved_hash:
+        raise LifecycleError("record content or raw-evidence provenance differs from approved snapshot")
     raw_ids = {record.raw_response_id for record in records}
-    register_snapshot(conn, snapshot_id=snapshot_id, event_id=event_id, effective_at=effective_at,
-                      actor_id=actor_id, reason=reason, raw_response_ids=raw_ids)
+    if None in raw_ids or "" in raw_ids:
+        raise LifecycleError("every approved record must reference a raw response")
+    for record in records:
+        index = record.source_record_index
+        if isinstance(index, bool) or not isinstance(index, int) or index < 0:
+            raise LifecycleError("every approved record must reference a valid original source-record index")
+        raw = conn.execute(
+            """SELECT rr.run_id, rr.source_id, rr.endpoint_id,
+                      cr.source_id AS run_source_id, cr.endpoint_id AS run_endpoint_id
+               FROM raw_responses rr
+               JOIN collection_runs cr ON cr.run_id=rr.run_id
+               WHERE rr.raw_response_id=?""",
+            (record.raw_response_id,),
+        ).fetchone()
+        if raw is None or (
+            raw["run_id"], raw["source_id"], raw["endpoint_id"],
+            raw["run_source_id"], raw["run_endpoint_id"],
+        ) != (
+            record.run_id, record.source_id, record.endpoint_id,
+            record.source_id, record.endpoint_id,
+        ):
+            raise LifecycleError(
+                "record provenance does not match its persisted raw response run/source/endpoint"
+            )
+    owns_transaction = not conn.in_transaction
+    conn.execute("SAVEPOINT a13_register_snapshot_for_records")
+    try:
+        register_snapshot(conn, snapshot_id=snapshot_id, event_id=event_id,
+                          effective_at=effective_at, actor_id=actor_id, reason=reason,
+                          raw_response_ids=raw_ids, commit=False)
+        for record in records:
+            conn.execute(
+                "INSERT INTO a13_snapshot_evidence_links "
+                "(snapshot_id, record_id, raw_response_id, source_record_index, linked_at) "
+                "VALUES (?,?,?,?,?)",
+                (snapshot_id, record.record_id, record.raw_response_id,
+                 record.source_record_index, effective_at),
+            )
+        conn.execute("RELEASE SAVEPOINT a13_register_snapshot_for_records")
+        if commit and owns_transaction:
+            conn.commit()
+    except Exception:
+        conn.execute("ROLLBACK TO SAVEPOINT a13_register_snapshot_for_records")
+        conn.execute("RELEASE SAVEPOINT a13_register_snapshot_for_records")
+        if commit and owns_transaction:
+            conn.rollback()
+        raise
 
 
 def supersede_snapshot(conn: sqlite3.Connection, *, old_snapshot_id: str, new_snapshot_id: str,
                        old_event_id: str, new_event_id: str, effective_at: str,
                        actor_id: str, reason: str, new_raw_response_ids: Iterable[str]) -> None:
-    new_raw_ids = sorted(set(new_raw_response_ids))
-    if not new_raw_ids: raise LifecycleError("replacement snapshot requires linked raw responses")
-    old = conn.execute("SELECT dataset_type,dataset_status FROM a13_snapshot_decisions WHERE snapshot_id=?",(old_snapshot_id,)).fetchone()
-    new = conn.execute("SELECT dataset_type,dataset_status FROM a13_snapshot_decisions WHERE snapshot_id=?",(new_snapshot_id,)).fetchone()
-    if not old or not new: raise LifecycleError("both old and replacement decisions must exist")
-    if old[0] != new[0] or new[1] not in ("approved_for_research","approved_with_warnings"):
-        raise LifecycleError("replacement must be approved and have the same dataset type")
-    conn.execute("BEGIN IMMEDIATE")
-    try:
-        _append_event(conn,event_id=old_event_id,snapshot_id=old_snapshot_id,event_type="superseded",effective_at=effective_at,
-                      actor_id=actor_id,reason=reason,related_snapshot_id=new_snapshot_id)
-        _append_event(conn,event_id=new_event_id,snapshot_id=new_snapshot_id,event_type="registered",effective_at=effective_at,
-                      actor_id=actor_id,reason=f"Replacement for {old_snapshot_id}: {reason}",related_snapshot_id=old_snapshot_id)
-        for raw_id in new_raw_ids:
-            if conn.execute("SELECT 1 FROM raw_responses WHERE raw_response_id=?",(raw_id,)).fetchone() is None:
-                raise LifecycleError(f"raw response {raw_id!r} does not exist")
-            conn.execute("INSERT INTO a13_snapshot_raw_links VALUES (?,?,?)",(new_snapshot_id,raw_id,effective_at))
-        conn.commit()
-    except Exception:
-        conn.rollback(); raise
+    """Reject legacy raw-only supersession.
 
+    A list of raw response IDs cannot prove which original source record
+    produced each replacement record. Use supersede_snapshot_for_records()
+    so the replacement lifecycle event and exact provenance links are atomic.
+    """
+    raise LifecycleError(
+        "raw-response-only supersession is not publication-safe; "
+        "use supersede_snapshot_for_records with approved evidence records"
+    )
 
 def withdraw_snapshot(conn: sqlite3.Connection, *, snapshot_id: str, event_id: str,
                       effective_at: str, actor_id: str, reason: str) -> None:
@@ -292,3 +345,65 @@ def assess_retention(conn: sqlite3.Connection, *, snapshot_id: str, now: str) ->
         expired=current >= expiry
         return RetentionAssessment(snapshot_id,assignment["policy_id"],expiry.isoformat().replace("+00:00","Z"),expired,state.legal_hold,raw,False)
     return RetentionAssessment(snapshot_id,None,None,False,state.legal_hold,raw,False)
+
+def supersede_snapshot_for_records(conn: sqlite3.Connection, *, old_snapshot_id: str,
+                                   new_snapshot_id: str, old_event_id: str,
+                                   new_event_id: str, effective_at: str,
+                                   actor_id: str, reason: str, records,
+                                   commit: bool = True) -> None:
+    """Atomically supersede a snapshot and register its replacement with exact
+    record-to-raw-response/source-index provenance.
+
+    Unlike the legacy raw-response-only helper, this is the publication-safe
+    replacement path. The replacement is not lifecycle-registered unless its
+    approved membership, content hash, and per-record source coordinates pass.
+    """
+    from .read_gate import snapshot_content_hash
+
+    rows = list(records)
+    if not rows:
+        raise LifecycleError("replacement snapshot requires approved evidence records")
+    old = conn.execute(
+        "SELECT dataset_type FROM a13_snapshot_decisions WHERE snapshot_id=?",
+        (old_snapshot_id,),
+    ).fetchone()
+    new = conn.execute(
+        "SELECT dataset_type, dataset_status, record_ids_json, snapshot_content_hash "
+        "FROM a13_snapshot_decisions WHERE snapshot_id=?",
+        (new_snapshot_id,),
+    ).fetchone()
+    if not old or not new:
+        raise LifecycleError("both old and replacement decisions must exist")
+    if old[0] != new[0] or new[1] not in ("approved_for_research", "approved_with_warnings"):
+        raise LifecycleError("replacement must be approved and have the same dataset type")
+    if set(json.loads(new[2])) != {record.record_id for record in rows}:
+        raise LifecycleError("replacement records differ from approved snapshot membership")
+    if len({record.record_id for record in rows}) != len(rows):
+        raise LifecycleError("replacement records must have unique IDs")
+    if snapshot_content_hash(rows) != new[3]:
+        raise LifecycleError("replacement content or source provenance differs from approved snapshot")
+
+    owns_transaction = not conn.in_transaction
+    conn.execute("SAVEPOINT a13_supersede_snapshot_for_records")
+    try:
+        _append_event(
+            conn, event_id=old_event_id, snapshot_id=old_snapshot_id,
+            event_type="superseded", effective_at=effective_at,
+            actor_id=actor_id, reason=reason, related_snapshot_id=new_snapshot_id,
+        )
+        register_snapshot_for_records(
+            conn, snapshot_id=new_snapshot_id, event_id=new_event_id,
+            effective_at=effective_at, actor_id=actor_id,
+            reason=f"Replacement for {old_snapshot_id}: {reason}",
+            records=rows, commit=False,
+        )
+        conn.execute("RELEASE SAVEPOINT a13_supersede_snapshot_for_records")
+        if commit and owns_transaction:
+            conn.commit()
+    except Exception:
+        conn.execute("ROLLBACK TO SAVEPOINT a13_supersede_snapshot_for_records")
+        conn.execute("RELEASE SAVEPOINT a13_supersede_snapshot_for_records")
+        if commit and owns_transaction:
+            conn.rollback()
+        raise
+

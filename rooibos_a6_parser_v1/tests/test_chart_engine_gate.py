@@ -5,12 +5,13 @@ import unittest
 from rooibos_a13.models import EvidenceRecord, canonical_hash
 from rooibos_a13.read_gate import snapshot_content_hash, SnapshotAccessDenied
 from rooibos_chart_engine.a13_reader import ChartSnapshotReader
-from rooibos_a13.lifecycle import apply_migration_008, register_snapshot
+from rooibos_a13.lifecycle import apply_migration_008, register_snapshot_for_records
 
 
 class ChartEngineGateTests(unittest.TestCase):
     def setUp(self):
         self.conn = sqlite3.connect(':memory:')
+        self.conn.row_factory = sqlite3.Row
         self.conn.execute('''CREATE TABLE a13_snapshot_decisions (
             snapshot_id TEXT PRIMARY KEY, dataset_type TEXT, record_ids_json TEXT,
             dataset_status TEXT, assessments_hash TEXT, findings_json TEXT,
@@ -36,12 +37,27 @@ class ChartEngineGateTests(unittest.TestCase):
             'approved_for_research', self.assessments_hash, '[]',
             '2026-11-09T10:01:00+00:00', 'a13-governance/0.1.0', self.snapshot_hash))
         self.conn.commit()
-        self.conn.execute('CREATE TABLE raw_responses (raw_response_id TEXT PRIMARY KEY)')
-        for i in range(3): self.conn.execute('INSERT INTO raw_responses VALUES (?)', (f'raw-{i}',))
+        self.conn.execute('''CREATE TABLE collection_runs (
+            run_id TEXT PRIMARY KEY, source_id TEXT, endpoint_id TEXT)''')
+        self.conn.execute(
+            "INSERT INTO collection_runs VALUES (?,?,?)",
+            ('run-1', 'provider-a', 'ohlcv'),
+        )
+        self.conn.execute('''CREATE TABLE raw_responses (
+            raw_response_id TEXT PRIMARY KEY, run_id TEXT, source_id TEXT, endpoint_id TEXT)''')
+        for i in range(3):
+            self.conn.execute(
+                'INSERT INTO raw_responses VALUES (?,?,?,?)',
+                (f'raw-{i}', 'run-1', 'provider-a', 'ohlcv'),
+            )
         apply_migration_008(self.conn)
-        register_snapshot(self.conn, snapshot_id='snapshot-1', event_id='snapshot-1:registered',
+        self.conn.execute("""CREATE TABLE a13_snapshot_evidence_links (
+            snapshot_id TEXT NOT NULL, record_id TEXT NOT NULL, raw_response_id TEXT NOT NULL,
+            source_record_index INTEGER NOT NULL, linked_at TEXT NOT NULL,
+            PRIMARY KEY(snapshot_id,record_id))""")
+        register_snapshot_for_records(self.conn, snapshot_id='snapshot-1', event_id='snapshot-1:registered',
             effective_at='2026-11-09T10:02:00Z', actor_id='test-governance', reason='publish chart fixture',
-            raw_response_ids=[f'raw-{i}' for i in range(3)])
+            records=self.records)
         self.reader = ChartSnapshotReader(self.conn, allowed_policy_versions={'a13-governance/0.1.0'})
 
     def test_approved_snapshot_exposes_sorted_candles(self):

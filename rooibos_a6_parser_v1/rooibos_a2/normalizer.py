@@ -54,6 +54,7 @@ class MarketObservationInput:
     market_scope: str = "unknown"  # token_aggregated, pool_specific, unknown
     normalization_version: str = "a2-normalization-v1.0.0"
     source_record_metadata: dict[str, Any] | None = None
+    source_record_count: int | None = None  # full provider-array length, supplied by the explicit adapter
 
 @dataclass(frozen=True)
 class A2Finding:
@@ -130,6 +131,11 @@ def normalize_observation(item: MarketObservationInput) -> A2Result:
         raise ValueError("observed_at must include an explicit timezone offset")
     if isinstance(item.source_record_index, bool) or not isinstance(item.source_record_index, int) or item.source_record_index < 0:
         raise ValueError("source_record_index must be a non-negative integer")
+    if item.source_record_count is not None:
+        if isinstance(item.source_record_count, bool) or not isinstance(item.source_record_count, int) or item.source_record_count < 1:
+            raise ValueError("source_record_count must be a positive integer")
+        if item.source_record_index >= item.source_record_count:
+            raise ValueError("source_record_index is outside source_record_count")
     if item.market_scope not in {"token_aggregated", "pool_specific", "unknown"}:
         raise ValueError("unsupported market_scope")
     if item.market_scope == "pool_specific" and not item.pool_address and not item.market_id:
@@ -186,6 +192,8 @@ def normalize_observation(item: MarketObservationInput) -> A2Result:
             "version": item.normalization_version, "value": numeric if numeric is not None else text,
             "status": metric.value_status, "unit": unit, "quote": metric.quote_currency,
             "window": metric.window_seconds, "kind": metric.measurement_kind,
+            # Metadata is immutable observation content, not a replay-mutable annotation.
+            "metadata": metric.metadata or {},
         }
         content = json.dumps(identity, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
         digest = hashlib.sha256(content.encode()).hexdigest()

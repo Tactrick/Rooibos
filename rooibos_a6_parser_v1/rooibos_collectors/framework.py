@@ -76,6 +76,8 @@ class CollectorFramework:
         policy = self._require_policy(source_id, endpoint_id)
         if not policy.validated:
             raise CollectorPolicyError("Endpoint mapping has not passed validation; collection is disabled")
+        if not policy.enabled:
+            raise CollectorPolicyError("Endpoint policy is disabled; collection is not authorised")
         conn = _connect(self.db_path)
         try:
             collector = conn.execute("SELECT is_enabled FROM collectors WHERE collector_id=?", (collector_id,)).fetchone()
@@ -104,6 +106,10 @@ class CollectorFramework:
             conn.close()
 
     def transition(self, run_id: str, new_status: str, *, error_summary: str | None = None) -> None:
+        if new_status == "completed":
+            raise InvalidRunTransition(
+                "collector runs can complete only through complete_after_a13_publication()"
+            )
         conn = _connect(self.db_path)
         try:
             conn.execute("BEGIN IMMEDIATE")
@@ -125,10 +131,133 @@ class CollectorFramework:
         finally:
             conn.close()
 
+    def complete_after_a13_publication(
+        self, run_id: str, *, grant, records,
+        connection: sqlite3.Connection | None = None,
+    ) -> None:
+        """Complete a run only after independently re-authorizing its A13 grant.
+
+        When called with an existing transaction, publication and run completion
+        share one SQLite write transaction. This prevents a cancellation or
+        competing terminal transition from landing between publication commit
+        and completion.
+        """
+        from rooibos_a13.read_gate import GateGrant, authorize_snapshot
+
+        rows = list(records)
+        if not isinstance(grant, GateGrant) or not rows:
+            raise InvalidRunTransition("completion requires an A13 GateGrant and non-empty evidence records")
+        if any(getattr(record, "run_id", None) != run_id for record in rows):
+            raise InvalidRunTransition("A13 snapshot contains evidence from a different collection run")
+
+        owns_connection = connection is None
+        conn = connection if connection is not None else _connect(self.db_path)
+        try:
+            if owns_connection:
+                conn.execute("BEGIN IMMEDIATE")
+            elif not conn.in_transaction:
+                raise InvalidRunTransition("shared A13 completion requires an active transaction")
+
+            run = conn.execute(
+                "SELECT status, source_id, endpoint_id FROM collection_runs WHERE run_id=?", (run_id,)
+            ).fetchone()
+            if run is None:
+                raise KeyError(f"Unknown collection run: {run_id}")
+            if run["status"] != "validating":
+                raise InvalidRunTransition(
+                    f"A13 publication can complete only a validating run, not {run['status']!r}"
+                )
+            if any(
+                (record.source_id, record.endpoint_id) != (run["source_id"], run["endpoint_id"])
+                for record in rows
+            ):
+                raise InvalidRunTransition(
+                    "A13 evidence source/endpoint does not match the collection run"
+                )
+
+            for record in rows:
+                raw = conn.execute(
+                    "SELECT run_id, source_id, endpoint_id FROM raw_responses WHERE raw_response_id=?",
+                    (record.raw_response_id,),
+                ).fetchone()
+                if raw is None or (
+                    raw["run_id"], raw["source_id"], raw["endpoint_id"]
+                ) != (run_id, record.source_id, record.endpoint_id):
+                    raise InvalidRunTransition(
+                        "A13 evidence raw-response provenance does not belong to this collection run"
+                    )
+
+            verified = authorize_snapshot(
+                conn,
+                snapshot_id=grant.snapshot_id,
+                records=rows,
+                expected_snapshot_hash=grant.snapshot_hash,
+                expected_assessments_hash=grant.assessments_hash,
+                allowed_policy_versions={grant.policy_version},
+                allow_warnings=(grant.dataset_status == "approved_with_warnings"),
+                require_lifecycle=True,
+            )
+            if verified != grant:
+                raise InvalidRunTransition("supplied A13 grant differs from freshly verified persisted authorization")
+
+            completed_at = datetime.now(timezone.utc).isoformat()
+            conn.execute(
+                "UPDATE collection_runs SET status='completed', completed_at=?, error_summary=NULL WHERE run_id=?",
+                (completed_at, run_id),
+            )
+            if owns_connection:
+                conn.commit()
+        except Exception:
+            if owns_connection:
+                conn.rollback()
+            raise
+        finally:
+            if owns_connection:
+                conn.close()
+
+    def mark_publication_failure(self, run_id: str, error_summary: str) -> None:
+        """Mark only a post-normalization A13 failure as publication-retryable.
+
+        The run remains in validating state; the separate immutable-evidence
+        receipt and failure marker distinguish this from arbitrary failed runs.
+        """
+        conn = _connect(self.db_path)
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """SELECT cr.status, m.raw_response_id
+                   FROM collection_runs cr
+                   JOIN collection_record_manifests m ON m.run_id=cr.run_id
+                   WHERE cr.run_id=?""",
+                (run_id,),
+            ).fetchone()
+            if row is None or row["status"] != "validating":
+                raise InvalidRunTransition(
+                    "publication failure can be recorded only for a validating run with a source-record manifest"
+                )
+            conn.execute(
+                """UPDATE collection_runs
+                   SET publication_failed_at=COALESCE(publication_failed_at,?),
+                       publication_failure_summary=?
+                   WHERE run_id=? AND status='validating'""",
+                (datetime.now(timezone.utc).isoformat(), error_summary[:1000], run_id),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
     def authorise_request(self, run_id: str, params: Mapping[str, Any]) -> RequestTicket:
         """Create an auditable request ticket; this does not execute a network call."""
         conn = _connect(self.db_path)
         try:
+            # Serialize sequence allocation and run-state validation. The
+            # UNIQUE(run_id, request_sequence) constraint remains the final
+            # integrity barrier, while BEGIN IMMEDIATE avoids routine races
+            # between concurrent request authorizations for the same run.
+            conn.execute("BEGIN IMMEDIATE")
             run = conn.execute("SELECT source_id,endpoint_id,status FROM collection_runs WHERE run_id=?", (run_id,)).fetchone()
             if not run:
                 raise KeyError(f"Unknown collection run: {run_id}")
@@ -171,10 +300,17 @@ class CollectorFramework:
                 WHERE r.request_id=?""", (ticket.request_id,)).fetchone()
             if not request or request["run_id"] != ticket.run_id or request["endpoint_id"] != ticket.endpoint_id:
                 raise CollectorPolicyError("Request ticket provenance is invalid")
-            if request["run_status"] != "collecting":
-                raise InvalidRunTransition("A response can only be captured while the run is collecting")
             request_params = json.loads(request["request_params_json"])
             source_id = request["source_id"]
+            existing = conn.execute(
+                """SELECT request_id FROM raw_responses WHERE raw_response_id=?""",
+                (raw_response_id,),
+            ).fetchone()
+            already_captured = existing is not None
+            if already_captured and existing["request_id"] != ticket.request_id:
+                raise CollectorPolicyError("Raw response ID is already bound to a different request")
+            if request["run_status"] != "collecting" and not already_captured:
+                raise InvalidRunTransition("A new response can only be captured while the run is collecting")
         finally:
             conn.close()
         raw_hash = store_raw_response(
@@ -184,11 +320,33 @@ class CollectorFramework:
             http_status=http_status,response_headers=response_headers,content_type=content_type,
             page_sequence=page_sequence,
         )
+        # store_raw_response enforces exact equality for an existing ID. An
+        # exact retry must not increment response_count or regress a run that
+        # has already advanced beyond raw capture.
+        if already_captured:
+            return raw_hash
         conn = _connect(self.db_path)
         try:
             conn.execute("BEGIN IMMEDIATE")
-            conn.execute("UPDATE collection_runs SET response_count=response_count+1,status='raw_captured' WHERE run_id=?", (ticket.run_id,))
-            conn.execute("UPDATE collection_requests SET response_status=? WHERE request_id=?", (http_status,ticket.request_id))
+            # The run may have been cancelled or failed after the initial
+            # ticket check and raw-response insert. Never resurrect a terminal
+            # run by unconditionally writing raw_captured here.
+            updated = conn.execute(
+                """UPDATE collection_runs
+                   SET response_count=(
+                       SELECT COUNT(*) FROM raw_responses WHERE run_id=?
+                   ),status='raw_captured'
+                   WHERE run_id=? AND status IN ('collecting','raw_captured')""",
+                (ticket.run_id, ticket.run_id),
+            )
+            if updated.rowcount != 1:
+                raise InvalidRunTransition(
+                    "Collection run left collecting state before response capture completed"
+                )
+            conn.execute(
+                "UPDATE collection_requests SET response_status=? WHERE request_id=?",
+                (http_status,ticket.request_id),
+            )
             conn.commit()
         except Exception:
             conn.rollback()

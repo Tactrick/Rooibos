@@ -17,6 +17,7 @@ class DiscoveryContext:
     source_record_index: int
     observed_at: str
     normalization_version: str = "a1-normalizer/0.1.0"
+    source_record_count: int | None = None  # full provider-array length, supplied by the explicit adapter
 
 @dataclass(frozen=True)
 class TokenMetadata:
@@ -56,8 +57,13 @@ def validate_context(ctx: DiscoveryContext) -> None:
             raise A1ValidationError("invalid Solana base58 mint; identity is case-sensitive")
     for field in ("source_id", "endpoint_id", "run_id", "raw_response_id", "observed_at", "normalization_version"):
         _required_text(getattr(ctx, field), field)
-    if not isinstance(ctx.source_record_index, int) or ctx.source_record_index < 0:
+    if isinstance(ctx.source_record_index, bool) or not isinstance(ctx.source_record_index, int) or ctx.source_record_index < 0:
         raise A1ValidationError("source_record_index must be a non-negative integer")
+    if ctx.source_record_count is not None:
+        if isinstance(ctx.source_record_count, bool) or not isinstance(ctx.source_record_count, int) or ctx.source_record_count < 1:
+            raise A1ValidationError("source_record_count must be a positive integer")
+        if ctx.source_record_index >= ctx.source_record_count:
+            raise A1ValidationError("source_record_index is outside source_record_count")
 
 
 def normalize_observation(context: DiscoveryContext, record: Mapping[str, Any], *,

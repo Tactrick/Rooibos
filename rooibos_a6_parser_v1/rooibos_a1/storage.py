@@ -1,7 +1,10 @@
-"""Append-only SQLite persistence for A1; deliberately isolated from A2/A6 tables."""
-import json, sqlite3
+"""Append-only SQLite persistence for A1, bound to immutable collection evidence."""
+import json
+import sqlite3
+import hashlib
 from dataclasses import asdict
-from .models import DiscoveryObservation
+
+from .models import DiscoveryObservation, validate_context
 
 MIGRATION_VERSION = 5
 
@@ -50,20 +53,125 @@ def apply_migration_005(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-def store_observation(conn: sqlite3.Connection, obs: DiscoveryObservation) -> bool:
-    """Returns True for a new observation, False for exact idempotent replay."""
-    c, m = obs.context, obs.metadata
-    values = (obs.observation_key, c.chain, c.mint, c.source_id, c.endpoint_id, c.run_id,
-              c.raw_response_id, c.source_record_index, c.observed_at, c.normalization_version,
-              obs.provider_record_id, m.symbol, m.name, m.decimals, m.creator, m.created_at,
-              m.first_seen_at, m.launchpad, m.website,
-              json.dumps(m.social_links, sort_keys=True) if m.social_links is not None else None,
-              json.dumps({k: ("not_reported" if v is None else "reported") for k, v in asdict(m).items()}, sort_keys=True),
-              json.dumps(obs.raw_record, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str), obs.content_hash)
-    cur = conn.execute('''INSERT OR IGNORE INTO token_discovery_observations
-      (observation_key,chain,mint,source_id,endpoint_id,run_id,raw_response_id,source_record_index,
-       observed_at,normalization_version,provider_record_id,symbol,name,decimals,creator,source_created_at,
-       source_first_seen_at,launchpad,website,social_links_json,metadata_field_states_json,raw_record_json,content_hash)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''', values)
-    conn.commit()
-    return cur.rowcount == 1
+def store_observation(conn: sqlite3.Connection, obs: DiscoveryObservation, *, commit: bool = True) -> bool:
+    """Persist only against matching captured evidence; exact replay is idempotent.
+
+    The write lock is acquired before checking run status so publication cannot
+    race a concurrent A13-gated completion. Completed runs are immutable.
+    Returns True for a new observation and False for an exact replay.
+    """
+    owns_transaction = not conn.in_transaction
+    if owns_transaction:
+        conn.execute("BEGIN IMMEDIATE")
+    conn.execute("SAVEPOINT a1_store_observation")
+    try:
+        if not isinstance(obs, DiscoveryObservation):
+            raise TypeError("A1 storage accepts DiscoveryObservation objects only")
+        c, m = obs.context, obs.metadata
+        validate_context(c)
+        if not isinstance(obs.raw_record, dict):
+            raise ValueError("A1 raw_record must be an object")
+        canonical_record = json.dumps(
+            obs.raw_record, sort_keys=True, separators=(",", ":"),
+            ensure_ascii=False, default=str,
+        )
+        expected_content_hash = hashlib.sha256(canonical_record.encode()).hexdigest()
+        if obs.content_hash != expected_content_hash:
+            raise ValueError("A1 raw-record content hash does not match the supplied record")
+        key_material = {
+            "chain": c.chain, "mint": c.mint, "source_id": c.source_id,
+            "endpoint_id": c.endpoint_id, "run_id": c.run_id,
+            "source_record_index": c.source_record_index,
+            "content_hash": expected_content_hash,
+            "normalization_version": c.normalization_version,
+        }
+        canonical_key = hashlib.sha256(json.dumps(
+            key_material, sort_keys=True, separators=(",", ":")
+        ).encode()).hexdigest()
+        if obs.observation_key != canonical_key:
+            raise ValueError("A1 observation key does not match its canonical identity and content")
+        raw = conn.execute(
+            """SELECT rr.run_id, rr.source_id, rr.endpoint_id, cr.status
+               FROM raw_responses rr JOIN collection_runs cr ON cr.run_id=rr.run_id
+               WHERE rr.raw_response_id=?""",
+            (c.raw_response_id,),
+        ).fetchone()
+        if not raw:
+            raise ValueError("A1 observation requires an existing immutable raw response")
+        if (raw["run_id"], raw["source_id"], raw["endpoint_id"]) != (
+            c.run_id, c.source_id, c.endpoint_id
+        ):
+            raise ValueError("A1 observation provenance does not match its raw response")
+        if raw["status"] not in {"raw_captured", "parsed", "normalised", "validating", "partial"}:
+            raise ValueError("A1 persistence requires a non-terminal captured collection run")
+
+        values = (
+            obs.observation_key, c.chain, c.mint, c.source_id, c.endpoint_id, c.run_id,
+            c.raw_response_id, c.source_record_index, c.observed_at, c.normalization_version,
+            obs.provider_record_id, m.symbol, m.name, m.decimals, m.creator, m.created_at,
+            m.first_seen_at, m.launchpad, m.website,
+            json.dumps(m.social_links, sort_keys=True) if m.social_links is not None else None,
+            json.dumps({k: ("not_reported" if v is None else "reported") for k, v in asdict(m).items()}, sort_keys=True),
+            json.dumps(obs.raw_record, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str),
+            obs.content_hash,
+        )
+        columns = (
+            "observation_key,chain,mint,source_id,endpoint_id,run_id,raw_response_id,"
+            "source_record_index,observed_at,normalization_version,provider_record_id,"
+            "symbol,name,decimals,creator,source_created_at,source_first_seen_at,launchpad,"
+            "website,social_links_json,metadata_field_states_json,raw_record_json,content_hash"
+        )
+        existing = conn.execute(
+            f"SELECT {columns} FROM token_discovery_observations WHERE observation_key=?",
+            (obs.observation_key,),
+        ).fetchone()
+        if existing:
+            if tuple(existing) != values:
+                raise ValueError("A1 observation key already exists with different content or provenance")
+            conn.execute("RELEASE SAVEPOINT a1_store_observation")
+            if owns_transaction and commit:
+                conn.commit()
+            return False
+        if raw["status"] == "validating":
+            raise ValueError("A1 cannot append new observations after validation has begun")
+        conn.execute(
+            f"""INSERT INTO token_discovery_observations ({columns})
+                VALUES ({",".join("?" for _ in values)})""",
+            values,
+        )
+        conn.execute("RELEASE SAVEPOINT a1_store_observation")
+        if owns_transaction and commit:
+            conn.commit()
+        return True
+    except Exception:
+        conn.execute("ROLLBACK TO SAVEPOINT a1_store_observation")
+        conn.execute("RELEASE SAVEPOINT a1_store_observation")
+        if owns_transaction:
+            conn.rollback()
+        raise
+
+
+def store_observations(conn: sqlite3.Connection, observations) -> int:
+    """Persist a batch of A1 observations atomically; exact replays are idempotent."""
+    rows = list(observations)
+    if not rows:
+        raise ValueError("A1 observation batch cannot be empty")
+    keys = [item.observation_key for item in rows]
+    if len(keys) != len(set(keys)):
+        raise ValueError("A1 observation batch contains duplicate observation keys")
+    owns_transaction = not conn.in_transaction
+    if owns_transaction:
+        conn.execute("BEGIN IMMEDIATE")
+    conn.execute("SAVEPOINT a1_store_observations")
+    try:
+        inserted = sum(store_observation(conn, item, commit=False) for item in rows)
+        conn.execute("RELEASE SAVEPOINT a1_store_observations")
+        if owns_transaction:
+            conn.commit()
+        return inserted
+    except Exception:
+        conn.execute("ROLLBACK TO SAVEPOINT a1_store_observations")
+        conn.execute("RELEASE SAVEPOINT a1_store_observations")
+        if owns_transaction:
+            conn.rollback()
+        raise

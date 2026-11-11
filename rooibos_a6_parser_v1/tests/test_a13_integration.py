@@ -1,16 +1,21 @@
 import sqlite3
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from rooibos_db.database import initialize_database, _connect, MIGRATION_VERSION
 from rooibos_a1.models import DiscoveryContext, normalize_observation as normalize_a1
+from rooibos_a1.storage import store_observation as store_a1_observation
 from rooibos_a2.normalizer import MarketMetricInput, MarketObservationInput, normalize_observation as normalize_a2
 from rooibos_a6.parser import ParseContext, normalise_records
-from rooibos_a13.models import SourcePolicy
+from rooibos_a13.models import SourcePolicy, canonical_hash
+from rooibos_a13.models import RecordAssessment, Finding
+from rooibos_a13.storage import store_assessment
 from rooibos_a13.read_gate import authorize_snapshot, snapshot_content_hash, SnapshotAccessDenied
 from rooibos_integrations.a13_projection import project_a1, project_a2, project_a6, assess_and_store_snapshot
 from rooibos_a13.lifecycle import register_snapshot_for_records
+from rooibos_a13.validator import assess_record
 
 MINT = "So11111111111111111111111111111111111111112"
 POLICIES = {"fixture_source": SourcePolicy("fixture_source", ("fixture_endpoint",), True)}
@@ -25,13 +30,49 @@ class A13PipelineIntegrationTests(unittest.TestCase):
     def tearDown(self):
         self.conn.close(); self.tmp.cleanup()
 
-    def test_migration_chain_001_to_008_and_legacy_schema(self):
+    def test_assessment_insert_ignore_requires_exact_immutable_retry(self):
+        original = RecordAssessment(
+            "record-one", "valid", (), "2026-11-11T10:00:00Z"
+        )
+        self.assertTrue(store_assessment(
+            self.conn, original, "assessment-one", "hash-one"
+        ))
+        self.assertFalse(store_assessment(
+            self.conn, original, "assessment-one", "hash-one"
+        ))
+
+        changed_same_id = RecordAssessment(
+            "record-one", "rejected",
+            (Finding("BAD", "error", "changed assessment"),),
+            "2026-11-11T10:00:00Z"
+        )
+        with self.assertRaisesRegex(ValueError, "different immutable assessment content"):
+            store_assessment(
+                self.conn, changed_same_id, "assessment-one", "hash-two"
+            )
+
+        changed_same_hash = RecordAssessment(
+            "record-two", "valid", (), "2026-11-11T10:00:00Z"
+        )
+        with self.assertRaisesRegex(ValueError, "different immutable assessment content"):
+            store_assessment(
+                self.conn, changed_same_hash, "assessment-two", "hash-one"
+            )
+
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT COUNT(*) FROM a13_record_assessments"
+            ).fetchone()[0],
+            1,
+        )
+
+    def test_migration_chain_001_to_011_and_legacy_schema(self):
         versions = [r[0] for r in self.conn.execute("SELECT version FROM schema_migrations ORDER BY version")]
-        self.assertEqual(versions, [1,2,3,4,5,6,7,8])
-        self.assertEqual(MIGRATION_VERSION, 8)
+        self.assertEqual(versions, [1,2,3,4,5,6,7,8,9,10,11])
+        self.assertEqual(MIGRATION_VERSION, 11)
         tables = {r[0] for r in self.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        self.assertTrue({"ohlcv_candles", "market_observations", "token_discovery_observations",
-                         "a13_record_assessments", "a13_snapshot_decisions", "a13_snapshot_lifecycle_events", "a13_retention_policies"}.issubset(tables))
+        self.assertTrue({"ohlcv_candles", "a6_candle_evidence_links", "market_observations", "token_discovery_observations",
+                         "a13_record_assessments", "a13_snapshot_decisions", "a13_snapshot_lifecycle_events", "a13_snapshot_evidence_links", "a13_retention_policies", "collection_record_manifests"}.issubset(tables))
         self.assertIn("snapshot_content_hash", {r[1] for r in self.conn.execute("PRAGMA table_info(a13_snapshot_decisions)")})
 
     def test_a1_projection_and_snapshot_gate(self):
@@ -43,9 +84,10 @@ class A13PipelineIntegrationTests(unittest.TestCase):
             source_policies=POLICIES, assessed_at="2026-11-09T10:01:00Z", decided_at="2026-11-09T10:02:00Z")
         self.assertEqual(decision.dataset_status, "approved_for_research")
         self.conn.execute("INSERT INTO sources(source_id,source_name,source_type) VALUES ('fixture_source','Fixture','api')")
+        self.conn.execute("INSERT INTO source_endpoints(endpoint_id,source_id,endpoint_name,method,path) VALUES ('fixture_endpoint','fixture_source','fixture_endpoint','GET','/fixture')")
         self.conn.execute("INSERT INTO collectors(collector_id,collector_name,module_code,version) VALUES ('fixture-collector','Fixture','A1','1')")
-        self.conn.execute("INSERT INTO collection_runs(run_id,collector_id,source_id,collector_version,requested_scope_json,started_at,status) VALUES ('run-a1','fixture-collector','fixture_source','1','{}','2026-11-09T10:00:00Z','completed')")
-        self.conn.execute("INSERT INTO raw_responses(raw_response_id,run_id,source_id,retrieved_at,request_params_json,payload_json,payload_sha256) VALUES ('raw-a1','run-a1','fixture_source','2026-11-09T10:00:00Z','{}','{}','fixture-hash')")
+        self.conn.execute("INSERT INTO collection_runs(run_id,collector_id,source_id,endpoint_id,collector_version,requested_scope_json,started_at,status) VALUES ('run-a1','fixture-collector','fixture_source','fixture_endpoint','1','{}','2026-11-09T10:00:00Z','completed')")
+        self.conn.execute("INSERT INTO raw_responses(raw_response_id,run_id,source_id,endpoint_id,retrieved_at,request_params_json,payload_json,payload_sha256) VALUES ('raw-a1','run-a1','fixture_source','fixture_endpoint','2026-11-09T10:00:00Z','{}','{}','fixture-hash')")
         register_snapshot_for_records(self.conn, snapshot_id="snap-a1", event_id="snap-a1:registered",
             effective_at="2026-11-09T10:02:30Z", actor_id="test-governance", reason="publish approved fixture snapshot", records=[record])
         grant = authorize_snapshot(self.conn, snapshot_id="snap-a1", records=[record],
@@ -53,6 +95,143 @@ class A13PipelineIntegrationTests(unittest.TestCase):
             expected_assessments_hash=decision.assessments_hash,
             allowed_policy_versions={decision.policy_version}, now="2026-11-09T10:03:00Z")
         self.assertEqual(grant.record_ids, (record.record_id,))
+
+        # The supplied payload is mutable even though EvidenceRecord is frozen.
+        # Reusing the approved content_hash must not let a consumer substitute it.
+        from dataclasses import replace
+        altered = replace(record, payload={**record.payload, "symbol": "ALTERED"})
+        self.assertEqual(snapshot_content_hash([altered]), snapshot_content_hash([record]))
+        with self.assertRaisesRegex(SnapshotAccessDenied, "payload hash"):
+            authorize_snapshot(
+                self.conn, snapshot_id="snap-a1", records=[altered],
+                expected_snapshot_hash=snapshot_content_hash([altered]),
+                expected_assessments_hash=decision.assessments_hash,
+                allowed_policy_versions={decision.policy_version}, now="2026-11-09T10:03:00Z"
+            )
+
+
+    def test_a13_independently_rejects_malformed_a1_metadata(self):
+        context = DiscoveryContext(
+            "solana", MINT, "fixture_source", "fixture_endpoint",
+            "run-a1-validator", "raw-a1-validator", 0, "2026-11-09T10:00:00Z",
+        )
+        observation = normalize_a1(
+            context, {"symbol": "SOL", "decimals": 9},
+            field_map={"symbol": "symbol", "decimals": "decimals"},
+        )
+        record = project_a1(observation)
+        invalid_payloads = (
+            {"mint": "So1111111111111111111111111111111111111111Z"},
+            {"chain": "ethereum"},
+            {"symbol": 123},
+            {"decimals": True},
+            {"decimals": 256},
+            {"social_links": ["not", "an", "object"]},
+        )
+        for change in invalid_payloads:
+            with self.subTest(change=change):
+                payload = dict(record.payload)
+                payload.update(change)
+                malformed = replace(
+                    record, payload=payload, content_hash=canonical_hash(payload)
+                )
+                assessment = assess_record(
+                    malformed, POLICIES, assessed_at="2026-11-09T10:01:00Z"
+                )
+                self.assertEqual(assessment.status, "rejected")
+
+    def test_a13_read_gate_requires_exact_record_raw_response_and_source_index_links(self):
+        self.conn.execute("INSERT INTO sources(source_id,source_name,source_type) VALUES ('fixture_source','Fixture','api')")
+        self.conn.execute("INSERT INTO source_endpoints(endpoint_id,source_id,endpoint_name,method,path) VALUES ('fixture_endpoint','fixture_source','fixture_endpoint','GET','/fixture')")
+        self.conn.execute("INSERT INTO collectors(collector_id,collector_name,module_code,version) VALUES ('fixture-collector','Fixture','A1','1')")
+        self.conn.execute("""INSERT INTO collection_runs(run_id,collector_id,source_id,endpoint_id,collector_version,requested_scope_json,started_at,status)
+            VALUES ('run-coordinate','fixture-collector','fixture_source','fixture_endpoint','1','{}','2026-11-09T10:00:00Z','completed')""")
+        self.conn.execute("""INSERT INTO raw_responses(raw_response_id,run_id,source_id,endpoint_id,retrieved_at,request_params_json,payload_json,payload_sha256)
+            VALUES ('raw-coordinate','run-coordinate','fixture_source','fixture_endpoint','2026-11-09T10:00:00Z','{}','{}','fixture-hash')""")
+        ctx = DiscoveryContext("solana", MINT, "fixture_source", "fixture_endpoint",
+                               "run-coordinate", "raw-coordinate", 4, "2026-11-09T10:00:00Z")
+        record = project_a1(normalize_a1(ctx, {"symbol":"SOL"}, field_map={"symbol":"symbol"}))
+        _, decision = assess_and_store_snapshot(self.conn, [record], snapshot_id="snap-coordinate-links",
+            source_policies=POLICIES, assessed_at="2026-11-09T10:01:00Z",
+            decided_at="2026-11-09T10:02:00Z")
+        from rooibos_a13.lifecycle import register_snapshot_for_records
+        register_snapshot_for_records(self.conn, snapshot_id="snap-coordinate-links",
+            event_id="snap-coordinate-links:registered", effective_at="2026-11-09T10:02:30Z",
+            actor_id="test-governance", reason="register exact source-coordinate links", records=[record])
+        links = self.conn.execute(
+            "SELECT record_id,raw_response_id,source_record_index FROM a13_snapshot_evidence_links "
+            "WHERE snapshot_id=?", ("snap-coordinate-links",)).fetchall()
+        self.assertEqual([tuple(row) for row in links],
+                         [(record.record_id, "raw-coordinate", 4)])
+        kwargs = dict(snapshot_id="snap-coordinate-links", records=[record],
+            expected_snapshot_hash=snapshot_content_hash([record]),
+            expected_assessments_hash=decision.assessments_hash,
+            allowed_policy_versions={decision.policy_version}, now="2026-11-09T10:03:00Z")
+        self.assertEqual(authorize_snapshot(self.conn, **kwargs).record_ids, (record.record_id,))
+
+        # An extra raw-coordinate mapping must deny access even when the
+        # snapshot-level set of raw response IDs remains unchanged.
+        self.conn.execute(
+            "INSERT INTO a13_snapshot_evidence_links "
+            "(snapshot_id,record_id,raw_response_id,source_record_index,linked_at) "
+            "VALUES (?,?,?,?,?)",
+            ("snap-coordinate-links", "unexpected-record", "raw-coordinate", 99,
+             "2026-11-09T10:02:30Z"))
+        with self.assertRaisesRegex(SnapshotAccessDenied, "record-to-raw-response/source-index"):
+            authorize_snapshot(self.conn, **kwargs)
+
+        # Simulate corruption/missing evidence in an isolated test database:
+        # remove the append-only guard, then prove the read gate fails closed.
+        self.conn.execute("DROP TRIGGER trg_a13_evidence_links_no_delete")
+        self.conn.execute(
+            "DELETE FROM a13_snapshot_evidence_links WHERE snapshot_id=? AND record_id=?",
+            ("snap-coordinate-links", record.record_id))
+        with self.assertRaisesRegex(SnapshotAccessDenied, "record-to-raw-response/source-index"):
+            authorize_snapshot(self.conn, **kwargs)
+
+    def test_a1_storage_requires_matching_raw_response_provenance_and_exact_replay(self):
+        self.conn.execute("INSERT INTO sources(source_id,source_name,source_type) VALUES ('fixture_source','Fixture','api')")
+        self.conn.execute("INSERT INTO source_endpoints(endpoint_id,source_id,endpoint_name,path) VALUES ('fixture_endpoint','fixture_source','fixture','/fixture')")
+        self.conn.execute("INSERT INTO collectors(collector_id,collector_name,module_code,version) VALUES ('fixture-a1','A1','A1','1')")
+        self.conn.execute("""INSERT INTO collection_runs(run_id,collector_id,source_id,endpoint_id,collector_version,requested_scope_json,started_at,status)
+            VALUES ('run-a1-store','fixture-a1','fixture_source','fixture_endpoint','1','{}','2026-11-09T10:00:00Z','raw_captured')""")
+        self.conn.execute("""INSERT INTO raw_responses(raw_response_id,run_id,source_id,endpoint_id,retrieved_at,request_params_json,payload_json,payload_sha256)
+            VALUES ('raw-a1-store','run-a1-store','fixture_source','fixture_endpoint','2026-11-09T10:00:01Z','{}','{}','fixture-hash')""")
+        ctx = DiscoveryContext('solana', MINT, 'fixture_source', 'fixture_endpoint', 'run-a1-store', 'raw-a1-store', 0, '2026-11-09T10:00:01Z')
+        obs = normalize_a1(ctx, {'symbol':'SOL'}, field_map={'symbol':'symbol'})
+        self.assertTrue(store_a1_observation(self.conn, obs))
+        self.assertFalse(store_a1_observation(self.conn, obs))
+        tampered_raw = replace(obs, raw_record={"symbol": "ALTERED"})
+        with self.assertRaisesRegex(ValueError, "raw-record content hash"):
+            store_a1_observation(self.conn, tampered_raw)
+        tampered_identity = replace(
+            obs, context=replace(ctx, source_record_index=1)
+        )
+        with self.assertRaisesRegex(ValueError, "observation key"):
+            store_a1_observation(self.conn, tampered_identity)
+        bad_ctx = DiscoveryContext('solana', MINT, 'other_source', 'fixture_endpoint', 'run-a1-store', 'raw-a1-store', 0, '2026-11-09T10:00:01Z')
+        bad = normalize_a1(bad_ctx, {'symbol':'SOL'}, field_map={'symbol':'symbol'})
+        with self.assertRaises(ValueError):
+            store_a1_observation(self.conn, bad)
+
+        # A completed run is immutable: a late direct storage call must not
+        # append evidence after its A13 publication boundary.
+        self.conn.execute(
+            "UPDATE collection_runs SET status='completed' WHERE run_id=?",
+            ("run-a1-store",),
+        )
+        late_ctx = DiscoveryContext(
+            'solana', MINT, 'fixture_source', 'fixture_endpoint',
+            'run-a1-store', 'raw-a1-store', 1, '2026-11-09T10:00:02Z'
+        )
+        late_obs = normalize_a1(
+            late_ctx, {'symbol':'LATE'}, field_map={'symbol':'symbol'}
+        )
+        with self.assertRaisesRegex(ValueError, "non-terminal captured collection run"):
+            store_a1_observation(self.conn, late_obs)
+
+        count = self.conn.execute('SELECT COUNT(*) FROM token_discovery_observations').fetchone()[0]
+        self.assertEqual(count, 1)
 
     def test_a2_numeric_text_and_explicit_missingness_projection(self):
         base = dict(chain="solana", mint_address=MINT, observed_at="2026-11-09T10:00:00Z",
@@ -70,6 +249,61 @@ class A13PipelineIntegrationTests(unittest.TestCase):
             source_policies=POLICIES, assessed_at="2026-11-09T10:01:00Z", decided_at="2026-11-09T10:02:00Z")
         self.assertEqual(decision.dataset_status, "approved_for_research")
 
+    def test_a13_independently_rejects_malformed_a2_metrics_and_preserves_pool_identity(self):
+        base = dict(
+            chain="solana", mint_address=MINT, observed_at="2026-11-09T10:00:00Z",
+            source_id="fixture_source", endpoint_id="fixture_endpoint",
+            run_id="run-a2-validator", raw_response_id="raw-a2-validator",
+            source_record_index=0,
+        )
+        pool_item = MarketObservationInput(
+            **base, market_scope="pool_specific", pool_address="Pool111",
+            metrics=(MarketMetricInput("liquidity", 123.0),),
+        )
+        pool_metric = normalize_a2(pool_item).observations[0]
+        pool_record = project_a2(pool_metric)
+        self.assertEqual(pool_record.payload["pool_address"], "Pool111")
+        self.assertEqual(
+            assess_record(pool_record, POLICIES, assessed_at="2026-11-09T10:01:00Z").status,
+            "valid",
+        )
+
+        valid_metric = normalize_a2(MarketObservationInput(
+            **base, metrics=(MarketMetricInput("liquidity", 123.0),),
+        )).observations[0]
+        valid_record = project_a2(valid_metric)
+        invalid_payloads = (
+            {"value": -1.0},
+            {"value": float("nan")},
+            {"metric": "unregistered_metric"},
+            {"unit": "quote_per_token"},
+            {"market_scope": "invented_scope"},
+            {"window_seconds": True},
+            {"window_seconds": 0},
+        )
+        for change in invalid_payloads:
+            with self.subTest(change=change):
+                payload = dict(valid_record.payload)
+                payload.update(change)
+                malformed = replace(
+                    valid_record, payload=payload, content_hash=canonical_hash(payload)
+                )
+                assessment = assess_record(
+                    malformed, POLICIES, assessed_at="2026-11-09T10:01:00Z"
+                )
+                self.assertEqual(assessment.status, "rejected")
+
+        no_pool_identity = MarketObservationInput(
+            **base, market_scope="pool_specific",
+            metrics=(MarketMetricInput("liquidity", 123.0),),
+        )
+        no_identity_record = project_a2(normalize_a2(no_pool_identity).observations[0])
+        self.assertEqual(
+            assess_record(no_identity_record, POLICIES,
+                          assessed_at="2026-11-09T10:01:00Z").status,
+            "rejected",
+        )
+
     def test_a6_projection_unconfirmed_is_not_promoted_to_closed(self):
         context = ParseContext("solana", "asset-1", MINT, "15m", "fixture_source",
             "fixture_endpoint", "run-a6", "raw-a6", volume_unit="base_token")
@@ -86,6 +320,183 @@ class A13PipelineIntegrationTests(unittest.TestCase):
                 expected_assessments_hash=decision.assessments_hash,
                 allowed_policy_versions={decision.policy_version}, now="2026-11-09T10:03:00Z")
 
+    def test_a13_independently_rejects_malformed_ohlcv_values(self):
+        context = ParseContext("solana", "asset-a6-validator", MINT, "15m",
+            "fixture_source", "fixture_endpoint", "run-a6-validator", "raw-a6-validator",
+            volume_unit="base_token")
+        parsed = normalise_records([{"timestamp_ms":1794229200000,"open":1.0,
+            "high":1.2,"low":0.9,"close":1.1,"volume":12.0,
+            "candle_status":"closed"}], context)
+        record = project_a6(parsed.candles[0], observed_at="2026-11-09T10:00:00Z")
+        invalid_payloads = (
+            {"open": 0.0},
+            {"high": "1.2"},
+            {"volume": -1.0},
+            {"interval_ms": 0},
+            {"open_time_ms": True},
+            {"open_time_ms": 1794229200001},
+        )
+        for change in invalid_payloads:
+            with self.subTest(change=change):
+                payload = dict(record.payload)
+                payload.update(change)
+                malformed = replace(
+                    record, payload=payload, content_hash=canonical_hash(payload)
+                )
+                assessment = assess_record(
+                    malformed, POLICIES, assessed_at="2026-11-09T10:01:00Z"
+                )
+                self.assertEqual(assessment.status, "rejected")
+
+    def test_a13_warnings_are_quarantined_unless_explicitly_allowed(self):
+        context = ParseContext("solana", "asset-warning", MINT, "15m",
+            "fixture_source", "fixture_endpoint", "run-warning", "raw-warning",
+            volume_unit="base_token")
+        parsed = normalise_records([{"timestamp_ms":1794229200000,"open":1.0,
+            "high":1.2,"low":0.9,"close":1.1,"volume":12.0}], context)
+        record = project_a6(parsed.candles[0], observed_at="2026-11-09T10:00:00Z")
+        assessments, denied = assess_and_store_snapshot(self.conn, [record],
+            snapshot_id="snap-warning-default", source_policies=POLICIES,
+            assessed_at="2026-11-09T10:01:00Z", decided_at="2026-11-09T10:02:00Z")
+        self.assertEqual(assessments[0].status, "valid_with_warnings")
+        self.assertEqual(denied.dataset_status, "quarantined")
+        _, allowed = assess_and_store_snapshot(self.conn, [record],
+            snapshot_id="snap-warning-allowed", source_policies=POLICIES,
+            assessed_at="2026-11-09T10:01:00Z", decided_at="2026-11-09T10:02:00Z",
+            allow_warnings=True)
+        self.assertEqual(allowed.dataset_status, "approved_with_warnings")
+
+    def test_a13_unexpected_expected_membership_is_quarantined(self):
+        ctx = DiscoveryContext("solana", MINT, "fixture_source", "fixture_endpoint",
+            "run-extra", "raw-extra", 0, "2026-11-09T10:00:00Z")
+        record = project_a1(normalize_a1(ctx, {"symbol":"SOL"},
+            field_map={"symbol":"symbol"}))
+        _, decision = assess_and_store_snapshot(self.conn, [record],
+            snapshot_id="snap-extra-membership", source_policies=POLICIES,
+            assessed_at="2026-11-09T10:01:00Z", decided_at="2026-11-09T10:02:00Z",
+            expected_record_ids={"different-expected-record"})
+        self.assertEqual(decision.dataset_status, "quarantined")
+        self.assertIn("snapshot_unexpected_membership",
+                      {finding.code for finding in decision.findings})
+
+    def test_a13_explicitly_empty_expected_membership_is_quarantined(self):
+        ctx = DiscoveryContext("solana", MINT, "fixture_source", "fixture_endpoint",
+            "run-empty-expected", "raw-empty-expected", 0, "2026-11-09T10:00:00Z")
+        record = project_a1(normalize_a1(ctx, {"symbol":"SOL"},
+            field_map={"symbol":"symbol"}))
+        _, decision = assess_and_store_snapshot(self.conn, [record],
+            snapshot_id="snap-empty-expected", source_policies=POLICIES,
+            assessed_at="2026-11-09T10:01:00Z", decided_at="2026-11-09T10:02:00Z",
+            expected_record_ids=set())
+        self.assertEqual(decision.dataset_status, "quarantined")
+        self.assertIn("snapshot_empty_expected_membership",
+                      {finding.code for finding in decision.findings})
+
+    def test_a13_incomplete_expected_membership_is_quarantined(self):
+        ctx = DiscoveryContext("solana", MINT, "fixture_source", "fixture_endpoint",
+            "run-incomplete", "raw-incomplete", 0, "2026-11-09T10:00:00Z")
+        record = project_a1(normalize_a1(ctx, {"symbol":"SOL"},
+            field_map={"symbol":"symbol"}))
+        _, decision = assess_and_store_snapshot(self.conn, [record],
+            snapshot_id="snap-incomplete", source_policies=POLICIES,
+            assessed_at="2026-11-09T10:01:00Z", decided_at="2026-11-09T10:02:00Z",
+            expected_record_ids={record.record_id, "expected-but-missing"})
+        self.assertEqual(decision.dataset_status, "quarantined")
+        self.assertIn("snapshot_incomplete", {finding.code for finding in decision.findings})
+
+    def test_full_a13_publication_rolls_back_if_final_read_gate_fails(self):
+        from unittest.mock import patch
+        from rooibos_integrations.a13_projection import publish_evidence_snapshot
+
+        self.conn.execute(
+            "INSERT INTO sources(source_id,source_name,source_type) VALUES ('fixture_source','Fixture','api')"
+        )
+        self.conn.execute(
+            "INSERT INTO source_endpoints(endpoint_id,source_id,endpoint_name,method,path) "
+            "VALUES ('fixture_endpoint','fixture_source','fixture_endpoint','GET','/fixture')"
+        )
+        self.conn.execute(
+            "INSERT INTO collectors(collector_id,collector_name,module_code,version) "
+            "VALUES ('fixture-collector','Fixture','A1','1')"
+        )
+        self.conn.execute(
+            "INSERT INTO collection_runs(run_id,collector_id,source_id,endpoint_id,collector_version,"
+            "requested_scope_json,started_at,status) VALUES "
+            "('run-atomic-publication','fixture-collector','fixture_source','fixture_endpoint',"
+            "'1','{}','2026-11-09T10:00:00Z','completed')"
+        )
+        self.conn.execute(
+            "INSERT INTO raw_responses(raw_response_id,run_id,source_id,endpoint_id,retrieved_at,"
+            "request_params_json,payload_json,payload_sha256) VALUES "
+            "('raw-atomic-publication','run-atomic-publication','fixture_source','fixture_endpoint',"
+            "'2026-11-09T10:00:00Z','{}','{}','fixture-hash')"
+        )
+        context = DiscoveryContext(
+            "solana", MINT, "fixture_source", "fixture_endpoint",
+            "run-atomic-publication", "raw-atomic-publication", 0,
+            "2026-11-09T10:00:00Z",
+        )
+        record = project_a1(normalize_a1(
+            context, {"symbol": "SOL"}, field_map={"symbol": "symbol"}
+        ))
+
+        # Fail only after assessments, decision, lifecycle registration and
+        # record/raw-coordinate links have been staged inside the publication
+        # savepoint. The entire publication unit must disappear.
+        with patch(
+            "rooibos_a13.read_gate.authorize_snapshot",
+            side_effect=SnapshotAccessDenied("injected final-gate failure"),
+        ):
+            with self.assertRaisesRegex(SnapshotAccessDenied, "injected final-gate failure"):
+                publish_evidence_snapshot(
+                    self.conn, [record], snapshot_id="snap-atomic-publication",
+                    source_policies=POLICIES,
+                    assessed_at="2026-11-09T10:01:00Z",
+                    decided_at="2026-11-09T10:02:00Z",
+                    effective_at="2026-11-09T10:02:30Z",
+                    actor_id="test-governance", reason="test atomic publication",
+                )
+
+        for table in (
+            "a13_record_assessments", "a13_snapshot_decisions",
+            "a13_snapshot_lifecycle_events", "a13_snapshot_evidence_links",
+            "a13_snapshot_raw_links",
+        ):
+            self.assertEqual(
+                self.conn.execute(
+                    f"SELECT COUNT(*) FROM {table} WHERE " +
+                    ("snapshot_id=?" if table != "a13_record_assessments" else "1=1"),
+                    ("snap-atomic-publication",) if table != "a13_record_assessments" else (),
+                ).fetchone()[0],
+                0,
+                table,
+            )
+
+    def test_a13_assessments_and_decision_roll_back_as_one_unit(self):
+        ctx = DiscoveryContext("solana", MINT, "fixture_source", "fixture_endpoint",
+            "run-atomic", "raw-atomic", 7, "2026-11-09T10:00:00Z")
+        record = project_a1(normalize_a1(ctx, {"symbol":"SOL"},
+            field_map={"symbol":"symbol"}))
+        # Force the immutable decision insert to fail after assessment staging.
+        self.conn.execute("""INSERT INTO a13_snapshot_decisions
+            (snapshot_id,dataset_type,record_ids_json,dataset_status,assessments_hash,
+             findings_json,decided_at,policy_version,snapshot_content_hash)
+            VALUES ('snap-atomic','a1_discovery','["different-record"]','approved_for_research',
+                    'old-assessments','[]','2026-11-09T10:00:00Z',
+                    'a13-governance/0.1.0','old-snapshot-hash')""")
+        before = self.conn.execute(
+            "SELECT COUNT(*) FROM a13_record_assessments").fetchone()[0]
+        with self.assertRaises(ValueError):
+            assess_and_store_snapshot(self.conn, [record], snapshot_id="snap-atomic",
+                source_policies=POLICIES, assessed_at="2026-11-09T10:01:00Z",
+                decided_at="2026-11-09T10:02:00Z")
+        after = self.conn.execute(
+            "SELECT COUNT(*) FROM a13_record_assessments").fetchone()[0]
+        self.assertEqual(after, before)
+        self.assertEqual(self.conn.execute(
+            "SELECT record_ids_json FROM a13_snapshot_decisions WHERE snapshot_id='snap-atomic'"
+        ).fetchone()[0], '["different-record"]')
+
     def test_read_gate_rejects_altered_record_membership(self):
         ctx = DiscoveryContext("solana", MINT, "fixture_source", "fixture_endpoint", "run-a1",
                                "raw-a1", 0, "2026-11-09T10:00:00Z")
@@ -98,6 +509,24 @@ class A13PipelineIntegrationTests(unittest.TestCase):
                           content_hash="0" * 64)
         with self.assertRaises(SnapshotAccessDenied):
             authorize_snapshot(self.conn, snapshot_id="snap-gate", records=[altered],
+                expected_snapshot_hash=snapshot_content_hash([altered]),
+                expected_assessments_hash=decision.assessments_hash,
+                allowed_policy_versions={decision.policy_version}, now="2026-11-09T10:03:00Z")
+
+
+    def test_read_gate_hash_binds_raw_response_to_source_record_index(self):
+        ctx = DiscoveryContext("solana", MINT, "fixture_source", "fixture_endpoint",
+                               "run-coordinate", "raw-coordinate", 4, "2026-11-09T10:00:00Z")
+        record = project_a1(normalize_a1(ctx, {"symbol":"SOL"}, field_map={"symbol":"symbol"}))
+        _, decision = assess_and_store_snapshot(self.conn, [record], snapshot_id="snap-coordinate",
+            source_policies=POLICIES, assessed_at="2026-11-09T10:01:00Z",
+            decided_at="2026-11-09T10:02:00Z")
+        from dataclasses import replace
+        altered = replace(record, source_record_index=5)
+        # Even when the caller recomputes the supplied hash, the persisted
+        # approval remains bound to the original raw-response/source-index pair.
+        with self.assertRaises(SnapshotAccessDenied):
+            authorize_snapshot(self.conn, snapshot_id="snap-coordinate", records=[altered],
                 expected_snapshot_hash=snapshot_content_hash([altered]),
                 expected_assessments_hash=decision.assessments_hash,
                 allowed_policy_versions={decision.policy_version}, now="2026-11-09T10:03:00Z")

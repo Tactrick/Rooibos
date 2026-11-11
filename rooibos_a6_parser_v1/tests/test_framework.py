@@ -2,17 +2,21 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from rooibos_db.database import initialize_database, check_integrity
+import rooibos_collectors.framework as framework_module
 from rooibos_collectors import (
     CollectorFramework, CollectorPolicyError, EndpointPolicy, InvalidRunTransition,
 )
 from rooibos_a6.parser import ParseContext, normalise_records
 from rooibos_a6.storage import persist_parse_result
+from rooibos_collectors.a6_pipeline import process_a6_raw_response
+from rooibos_a13.models import SourcePolicy
 
 
 class CollectorFrameworkTests(unittest.TestCase):
@@ -72,6 +76,253 @@ class CollectorFrameworkTests(unittest.TestCase):
         self.assertEqual(c.execute('SELECT status FROM collection_runs WHERE run_id=?',('run1',)).fetchone()[0],'normalised')
         c.close()
         self.assertTrue(check_integrity(self.db)['ok'])
+
+
+    def test_page_sequence_requires_non_negative_integer(self):
+        self.create_run()
+        self.framework.transition('run1', 'configured')
+        ticket = self.framework.authorise_request(
+            'run1', {'mint':'MintABC','interval':'15m','limit':2}
+        )
+        for invalid in (-1, True, 1.5, '2'):
+            with self.subTest(page_sequence=invalid):
+                with self.assertRaisesRegex(ValueError, 'non-negative integer'):
+                    self.framework.capture_response(
+                        ticket, raw_response_id=f'raw-invalid-page-{str(invalid)}',
+                        payload={'synthetic':True}, page_sequence=invalid,
+                    )
+        # Invalid page metadata must not leave partial raw evidence behind.
+        c = sqlite3.connect(self.db)
+        self.assertEqual(
+            c.execute("SELECT COUNT(*) FROM raw_responses WHERE run_id='run1'").fetchone()[0],
+            0,
+        )
+        c.close()
+
+    def test_exact_response_capture_retry_is_idempotent_after_run_advances(self):
+        self.create_run()
+        self.framework.transition('run1', 'configured')
+        ticket = self.framework.authorise_request(
+            'run1', {'mint':'MintABC','interval':'15m','limit':2}
+        )
+        capture = dict(
+            raw_response_id='raw-idempotent-retry',
+            payload={'synthetic':True}, http_status=200,
+            retrieved_at='2026-11-11T09:00:00Z', page_sequence=0,
+        )
+        first_hash = self.framework.capture_response(ticket, **capture)
+        self.framework.transition('run1', 'parsed')
+        second_hash = self.framework.capture_response(ticket, **capture)
+        self.assertEqual(first_hash, second_hash)
+        c = sqlite3.connect(self.db)
+        run = c.execute(
+            'SELECT status,response_count FROM collection_runs WHERE run_id=?',
+            ('run1',),
+        ).fetchone()
+        raw_count = c.execute(
+            'SELECT COUNT(*) FROM raw_responses WHERE raw_response_id=?',
+            ('raw-idempotent-retry',),
+        ).fetchone()[0]
+        c.close()
+        self.assertEqual(run, ('parsed', 1))
+        self.assertEqual(raw_count, 1)
+
+    def test_response_capture_does_not_resurrect_run_cancelled_during_persistence(self):
+        self.create_run()
+        self.framework.transition('run1', 'configured')
+        ticket = self.framework.authorise_request(
+            'run1', {'mint':'MintABC','interval':'15m','limit':2}
+        )
+        original_store = framework_module.store_raw_response
+
+        def cancel_then_store(*args, **kwargs):
+            # Simulate cancellation after capture_response's initial status
+            # check but before its final run-state update.
+            self.framework.transition('run1', 'cancelled')
+            return original_store(*args, **kwargs)
+
+        with patch.object(framework_module, 'store_raw_response', side_effect=cancel_then_store):
+            with self.assertRaisesRegex(
+                InvalidRunTransition, 'left collecting state'
+            ):
+                self.framework.capture_response(
+                    ticket, raw_response_id='raw-cancel-race',
+                    payload={'synthetic':True}, http_status=200,
+                    retrieved_at='2026-11-11T09:00:00Z', page_sequence=0,
+                )
+
+        c = sqlite3.connect(self.db)
+        run = c.execute(
+            'SELECT status,response_count FROM collection_runs WHERE run_id=?',
+            ('run1',),
+        ).fetchone()
+        raw_count = c.execute(
+            'SELECT COUNT(*) FROM raw_responses WHERE raw_response_id=?',
+            ('raw-cancel-race',),
+        ).fetchone()[0]
+        c.close()
+        self.assertEqual(run, ('cancelled', 0))
+        # The immutable response may remain as audit evidence, but it must not
+        # move the terminal run back into a collectable state.
+        self.assertEqual(raw_count, 1)
+
+    def test_a6_raw_capture_to_a13_publication_end_to_end(self):
+        self.create_run()
+        self.framework.transition('run1', 'configured')
+        ticket = self.framework.authorise_request(
+            'run1', {'mint':'MintABC','interval':'15m','limit':2}
+        )
+        self.framework.capture_response(
+            ticket, raw_response_id='raw-pipeline',
+            payload={'provider_fixture':'synthetic', 'identity':{'mint':'MintABC'}, 'records':[
+                {'timestamp_ms':1794225600000,'open':1,'high':1.2,'low':.9,'close':1.1,'volume':10},
+                {'timestamp_ms':1794226500000,'open':1.1,'high':1.3,'low':1,'close':1.2,'volume':12},
+            ]},
+            http_status=200, retrieved_at='2026-11-09T10:00:01Z', page_sequence=0,
+        )
+        context = ParseContext(
+            chain='solana', asset_id='asset1', mint_address='MintABC',
+            interval='15m', source_id='moby', endpoint_id='ohlcv',
+            collection_run_id='run1', raw_response_ref='raw-pipeline',
+            volume_unit='base_token',
+        )
+        outcome = process_a6_raw_response(
+            self.framework, run_id='run1', raw_response_id='raw-pipeline',
+            parse_context=context,
+            request_identity_fields={'mint_address':'mint','interval':'interval'},
+            response_identity_fields={'mint_address':('identity','mint')},
+            decode_payload=lambda payload: [
+                dict(row, candle_status='closed', source_record_index=index,
+                     source_record_count=len(payload['records']))
+                for index, row in enumerate(payload['records'])
+            ],
+            snapshot_id='a6-e2e-snapshot',
+            source_policies={'moby': SourcePolicy('moby', ('ohlcv',), True)},
+            assessed_at='2026-11-09T10:02:00Z',
+            decided_at='2026-11-09T10:03:00Z',
+            effective_at='2026-11-09T10:04:00Z',
+            actor_id='test-governance', reason='verify complete A6 publication path',
+            expected_candle_count=2,
+        )
+        self.assertTrue(outcome.published)
+        self.assertEqual(len(outcome.candle_ids), 2)
+        self.assertEqual(outcome.decision.dataset_status, 'approved_for_research')
+        c = sqlite3.connect(self.db)
+        self.assertEqual(
+            c.execute("SELECT status FROM collection_runs WHERE run_id='run1'").fetchone()[0],
+            'completed',
+        )
+        self.assertEqual(
+            c.execute("SELECT COUNT(*) FROM a13_snapshot_raw_links WHERE snapshot_id='a6-e2e-snapshot'").fetchone()[0],
+            1,
+        )
+        c.close()
+
+
+    def test_a6_pipeline_quarantines_empty_decode_without_a13_publication(self):
+        self.create_run()
+        self.framework.transition('run1', 'configured')
+        ticket = self.framework.authorise_request(
+            'run1', {'mint':'MintABC','interval':'15m','limit':2}
+        )
+        self.framework.capture_response(
+            ticket, raw_response_id='raw-empty',
+            payload={'provider_fixture':'synthetic', 'identity':{'mint':'MintABC'}, 'records':[]},
+            http_status=200, retrieved_at='2026-11-09T10:00:01Z', page_sequence=0,
+        )
+        context = ParseContext(
+            chain='solana', asset_id='asset1', mint_address='MintABC',
+            interval='15m', source_id='moby', endpoint_id='ohlcv',
+            collection_run_id='run1', raw_response_ref='raw-empty',
+            volume_unit='base_token',
+        )
+        outcome = process_a6_raw_response(
+            self.framework, run_id='run1', raw_response_id='raw-empty',
+            parse_context=context, request_identity_fields={'mint_address':'mint','interval':'interval'},
+            response_identity_fields={'mint_address':('identity','mint')},
+            decode_payload=lambda payload: payload['records'],
+            snapshot_id='a6-empty-snapshot',
+            source_policies={'moby': SourcePolicy('moby', ('ohlcv',), True)},
+            assessed_at='2026-11-09T10:02:00Z',
+            decided_at='2026-11-09T10:03:00Z',
+            effective_at='2026-11-09T10:04:00Z',
+            actor_id='test-governance', reason='verify empty response quarantine',
+        )
+        self.assertFalse(outcome.published)
+        self.assertEqual(outcome.candle_ids, ())
+        c = sqlite3.connect(self.db)
+        self.assertEqual(
+            c.execute("SELECT status FROM collection_runs WHERE run_id='run1'").fetchone()[0],
+            'quarantined',
+        )
+        self.assertEqual(c.execute("SELECT COUNT(*) FROM a13_snapshot_decisions").fetchone()[0], 0)
+        self.assertEqual(c.execute("SELECT COUNT(*) FROM ohlcv_candles").fetchone()[0], 0)
+        c.close()
+
+
+    def _assert_a6_request_identity_mismatch_is_rejected(self, *, mismatch):
+        self.create_run()
+        self.framework.transition('run1', 'configured')
+        ticket = self.framework.authorise_request(
+            'run1', {'mint':'MintABC','interval':'15m','limit':2}
+        )
+        raw_id = 'raw-mismatch-' + mismatch
+        self.framework.capture_response(
+            ticket, raw_response_id=raw_id, payload={'identity':{'mint':'MintABC'}, 'records':[]},
+            http_status=200, retrieved_at='2026-11-09T10:00:01Z', page_sequence=0,
+        )
+        context = ParseContext(
+            chain='solana', asset_id='asset1',
+            mint_address='WrongMint' if mismatch == 'mint_address' else 'MintABC',
+            interval='1h' if mismatch == 'interval' else '15m',
+            source_id='moby', endpoint_id='ohlcv',
+            collection_run_id='run1', raw_response_ref=raw_id,
+        )
+        with self.assertRaisesRegex(ValueError, 'does not match captured request'):
+            process_a6_raw_response(
+                self.framework, run_id='run1', raw_response_id=raw_id,
+                parse_context=context,
+                request_identity_fields={'mint_address':'mint','interval':'interval'},
+                response_identity_fields={'mint_address':('identity','mint')},
+                decode_payload=lambda payload: payload['records'],
+                snapshot_id='mismatch-' + mismatch,
+                source_policies={'moby': SourcePolicy('moby', ('ohlcv',), True)},
+                assessed_at='2026-11-09T10:02:00Z',
+                decided_at='2026-11-09T10:03:00Z',
+                effective_at='2026-11-09T10:04:00Z',
+                actor_id='test-governance', reason='verify request identity binding',
+            )
+        c = sqlite3.connect(self.db)
+        self.assertEqual(c.execute("SELECT COUNT(*) FROM ohlcv_candles").fetchone()[0], 0)
+        self.assertEqual(c.execute(
+            "SELECT status FROM collection_runs WHERE run_id='run1'"
+        ).fetchone()[0], 'raw_captured')
+        c.close()
+
+    def test_a6_pipeline_rejects_mismatched_requested_mint(self):
+        self._assert_a6_request_identity_mismatch_is_rejected(mismatch='mint_address')
+
+    def test_a6_pipeline_rejects_mismatched_requested_interval(self):
+        self._assert_a6_request_identity_mismatch_is_rejected(mismatch='interval')
+
+    def _assert_a6_response_identity_rejected(self, *, payload, expected_message):
+        self.create_run()
+        self.framework.transition('run1', 'configured')
+        ticket = self.framework.authorise_request('run1', {'mint':'MintABC','interval':'15m','limit':2})
+        self.framework.capture_response(ticket, raw_response_id='raw-response-identity', payload=payload, http_status=200, retrieved_at='2026-11-09T10:00:01Z', page_sequence=0)
+        context = ParseContext(chain='solana', asset_id='asset1', mint_address='MintABC', interval='15m', source_id='moby', endpoint_id='ohlcv', collection_run_id='run1', raw_response_ref='raw-response-identity')
+        with self.assertRaisesRegex(ValueError, expected_message):
+            process_a6_raw_response(self.framework, run_id='run1', raw_response_id='raw-response-identity', parse_context=context, request_identity_fields={'mint_address':'mint','interval':'interval'}, response_identity_fields={'mint_address':('identity','mint')}, decode_payload=lambda value: value['records'], snapshot_id='response-identity-rejected', source_policies={'moby': SourcePolicy('moby', ('ohlcv',), True)}, assessed_at='2026-11-09T10:02:00Z', decided_at='2026-11-09T10:03:00Z', effective_at='2026-11-09T10:04:00Z', actor_id='test-governance', reason='verify response market identity')
+        c = sqlite3.connect(self.db)
+        self.assertEqual(c.execute('SELECT COUNT(*) FROM ohlcv_candles').fetchone()[0], 0)
+        self.assertEqual(c.execute("SELECT status FROM collection_runs WHERE run_id='run1'").fetchone()[0], 'raw_captured')
+        c.close()
+
+    def test_a6_pipeline_rejects_response_for_different_mint(self):
+        self._assert_a6_response_identity_rejected(payload={'identity':{'mint':'OtherMint'}, 'records':[]}, expected_message='response mint identity does not match')
+
+    def test_a6_pipeline_rejects_response_without_market_identity(self):
+        self._assert_a6_response_identity_rejected(payload={'records':[]}, expected_message='missing mapped market identity path')
 
     def test_unknown_endpoint_is_default_denied(self):
         framework = CollectorFramework(self.db,[])
@@ -135,6 +386,80 @@ class CollectorFrameworkTests(unittest.TestCase):
         self.framework.transition('run1','failed')
         with self.assertRaises(InvalidRunTransition):
             self.framework.transition('run1','collecting')
+
+    def test_collector_cannot_complete_without_a_verified_a13_publication(self):
+        self.create_run()
+        self.framework.transition('run1', 'configured')
+        self.framework.transition('run1', 'collecting')
+        self.framework.transition('run1', 'raw_captured')
+        self.framework.transition('run1', 'parsed')
+        self.framework.transition('run1', 'normalised')
+        self.framework.transition('run1', 'validating')
+
+        with self.assertRaisesRegex(InvalidRunTransition, 'complete_after_a13_publication'):
+            self.framework.transition('run1', 'completed')
+
+        with self.assertRaisesRegex(InvalidRunTransition, 'GateGrant'):
+            self.framework.complete_after_a13_publication(
+                'run1', grant=object(), records=[object()],
+            )
+
+        c = sqlite3.connect(self.db)
+        self.assertEqual(
+            c.execute("SELECT status FROM collection_runs WHERE run_id='run1'").fetchone()[0],
+            'validating',
+        )
+        c.close()
+
+    def test_authorise_request_failures_leave_counts_and_sequences_unchanged(self):
+        self.create_run()
+        self.framework.transition('run1', 'configured')
+
+        with self.assertRaises(CollectorPolicyError):
+            self.framework.authorise_request(
+                'run1', {'mint':'MintABC', 'unapproved':'value'}
+            )
+
+        c = sqlite3.connect(self.db)
+        run = c.execute(
+            "SELECT status,request_count FROM collection_runs WHERE run_id='run1'"
+        ).fetchone()
+        requests = c.execute(
+            "SELECT COUNT(*) FROM collection_requests WHERE run_id='run1'"
+        ).fetchone()[0]
+        c.close()
+        self.assertEqual(run, ('configured', 0))
+        self.assertEqual(requests, 0)
+
+        ticket = self.framework.authorise_request('run1', {'mint':'MintABC'})
+        self.assertEqual(ticket.request_sequence, 0)
+
+    def test_concurrent_request_authorizations_allocate_unique_ordered_sequences(self):
+        from concurrent.futures import ThreadPoolExecutor
+
+        self.create_run()
+        self.framework.transition('run1', 'configured')
+
+        def authorize(_):
+            return self.framework.authorise_request('run1', {'mint':'MintABC'})
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            tickets = list(executor.map(authorize, range(8)))
+
+        sequences = sorted(ticket.request_sequence for ticket in tickets)
+        self.assertEqual(sequences, list(range(8)))
+        self.assertEqual(len({ticket.request_id for ticket in tickets}), 8)
+
+        c = sqlite3.connect(self.db)
+        run = c.execute(
+            "SELECT status,request_count FROM collection_runs WHERE run_id='run1'"
+        ).fetchone()
+        persisted = c.execute(
+            "SELECT request_sequence FROM collection_requests WHERE run_id='run1' ORDER BY request_sequence"
+        ).fetchall()
+        c.close()
+        self.assertEqual(run, ('collecting', 8))
+        self.assertEqual([row[0] for row in persisted], list(range(8)))
 
     def test_request_cannot_be_issued_before_run_is_configured(self):
         self.create_run()

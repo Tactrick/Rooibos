@@ -66,3 +66,118 @@ Latest local test run: **61 tests passed**.
 - No paper positions, trading actions or wallet operations.
 
 A2 provider-neutral implementation is now included. Next pipeline work: A1 Token Discovery integration, followed by A13 independent validation and acceptance testing. A2 source-specific live acceptance and A6 live acceptance remain blocked on genuine provider fixtures and restricted adapter validation.
+
+
+## MET parallel-array adapter scaffold
+
+`rooibos_a6/moby_adapter.py` now provides an explicit-schema adapter for
+Moby's confirmed newest-first parallel-array response shape. The adapter
+requires the caller to supply the exact envelope path, array field names,
+timestamp unit and volume unit. It preserves provider array order so A6's
+`source_record_index` continues to refer to the original response position;
+the A6 normalizer independently orders canonical candles chronologically.
+
+Candle closure semantics are not inferred. Without an explicitly reviewed
+status field and value mapping, every candle is marked `unconfirmed`. Unknown
+status values also remain `unconfirmed`. Unequal array lengths, missing
+configured fields, missing envelopes and ambiguous timestamp units are rejected.
+
+This is adapter infrastructure only. No genuine MET response fixture has yet
+verified the envelope, concrete array names, timestamp unit, volume semantics,
+market identity or closure mapping. Therefore no MET mapping is instantiated,
+no Moby endpoint is enabled, and the initial target of 100 closed 15-minute
+candles cannot yet be claimed as achieved.
+
+## Moby get_token_ohlcv mapping status
+
+A source-specific profile now maps the compact `t/o/h/l/c/v` column names and
+millisecond timestamps. Public Moby tool descriptions corroborate that `t` is
+Unix milliseconds, prices are USD, the series is newest-first, and the
+in-progress candle is excluded by default (or appears at index zero when
+requested). The complete output schema is not published in the accessible
+first-party reference; compact OHLCV column names beyond `t`/`c` are therefore
+treated as a provisional mapping pending a genuine captured response.
+
+The decoder receives the captured `include_in_progress_candle` request value.
+It marks all rows unconfirmed if that request evidence is absent; if true, only
+row zero is forming; if false, returned rows are closed per the documented
+tool contract. The mapping requires an explicitly verified volume unit; USD
+price denomination alone is not treated as proof of volume denomination.
+
+**Still blocked:** no genuine Moby MET response fixture, verified response
+envelope, complete field schema, volume denomination or independent market
+identity mapping is available. No production mapping is registered or enabled,
+and no live Moby request has been made. The current profile is adapter code,
+not production source approval.
+## A6 request/response market-identity binding
+
+The A6 raw-response pipeline now requires two independent checks before decoding:
+
+- `request_identity_fields` explicitly maps the ParseContext mint and interval to the captured request parameters.
+- `response_identity_fields` explicitly maps the mint identity returned inside the immutable response payload to a nested field path. Missing or mismatched response identity is rejected before decoding, candle persistence or A13 publication.
+
+The response identity path is caller-supplied; no provider aliases or envelope paths are guessed. Synthetic tests cover matching identity, wrong-mint response and missing identity. The currently documented Moby OHLCV response description does not establish a verified returned mint-identity field or complete envelope. Therefore this new guard is proven only with synthetic fixtures; a genuine MET response fixture and explicit response identity mapping remain prerequisites for production integration. The Moby compact-array adapter must not be treated as independently proving token identity merely because the request specified a mint.
+
+### A6 original source-record coordinates
+
+The Moby parallel-array adapter now emits both `source_record_index` (the zero-based position in the original captured provider arrays) and `source_record_count` (the original array length) on every decoded row. It does not sort, filter, or collapse rows. The generic A6 normalizer honours an explicit source index when supplied, so rejected records retain their original index in findings and valid candles retain their original index after chronological sorting or duplicate handling. Duplicate explicit indices are structural errors.
+
+The A6 raw-response pipeline requires decoded rows to carry a complete one-to-one index set for the declared original source count. Missing, repeated, altered, or filtered source records therefore fail closed before persistence/publication rather than silently shifting provenance. This requirement applies to pipeline decoders; direct provider-neutral parser use may still omit explicit indices and receive positional indices for synthetic/local workflows. Tests use synthetic payloads only. A genuine Moby response fixture remains outstanding.
+
+
+## A13 exact source-coordinate publication links (migration 010)
+
+A13 now stores an append-only per-record evidence-link row containing
+`snapshot_id`, `record_id`, `raw_response_id`, and the original
+`source_record_index`. The existing snapshot-to-raw-response links remain
+for lifecycle and retention operations; they are not treated as sufficient
+proof of record-level provenance.
+
+Publication writes lifecycle registration, snapshot raw-response links, and
+per-record source-coordinate links within one transaction boundary. The
+read gate compares the complete persisted per-record relationship set against
+the approved evidence records and denies access on any missing, extra, or
+altered relationship. The source index is also bound into the approved
+snapshot content hash. Migration 010 is additive; earlier migrations remain
+immutable. Tests use synthetic local records only.
+
+### A1/A2 original source-record coverage
+
+The A1 and A2 raw-response pipelines now require their explicit provider
+adapters to declare the original response-array length as
+`source_record_count` on every decoded source record. Before persistence,
+each pipeline verifies that all declared counts agree and that the decoded
+records cover every original zero-based index exactly once. A2 validates
+source-record coverage before expanding each source record into multiple
+metric observations. Missing records, duplicate indices, inconsistent
+counts, or omitted counts fail closed. Direct normalizer use may omit the
+count for isolated local workflows; collector publication may not.
+
+### A13 replacement lifecycle
+
+The publication-safe replacement API is
+`supersede_snapshot_for_records()`. It validates replacement decision
+membership and content hash, then atomically supersedes the old snapshot and
+registers the replacement with exact per-record raw-response/source-index
+links. The legacy `supersede_snapshot()` API, which accepts only a list of raw
+response IDs, now fails closed because it cannot prove record-level
+provenance. Read authorization continues to require the exact per-record
+links, regardless of whether lifecycle checks are otherwise requested.
+
+
+
+## A6 publication completeness gate
+
+The raw-response pipeline now applies `assess_completeness()` before A13
+publication. Its default requirement is **100 consecutive closed 15-minute
+candles**. Forming and unconfirmed candles do not count toward the threshold
+and cannot bridge a gap between confirmed closed candles. A history that
+misses the threshold, contains a closed-candle gap, or otherwise fails the
+parser's completeness checks is quarantined before A13 publication.
+
+The `expected_candle_count` parameter exists for controlled tests and
+explicitly scoped validation runs; production operation should retain the
+default of 100 unless a separately reviewed data requirement justifies a
+different threshold. This gate is a completeness check, not proof that the
+provider's volume unit, response mapping, candle closure semantics or market
+identity are correct. Those still require genuine first-party Moby evidence.

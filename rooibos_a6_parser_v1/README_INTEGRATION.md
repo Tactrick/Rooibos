@@ -8,7 +8,7 @@
 - A1 Token Discovery models, policy and append-only storage.
 - A13 validation, governance, append-only assessment/decision storage and fail-closed snapshot read gate.
 - Provider-neutral projection adapters: `rooibos_integrations/a13_projection.py`.
-- Shared migration runner now applies migrations 001–007. Existing migration SQL 001–004 is unchanged; `moby_market.db` remains the database filename.
+- Shared migration runner now applies migrations 001–010. Existing migration SQL 001–004 is unchanged; migrations are checksum-verified and `moby_market.db` remains the database filename.
 
 ## Projection contracts
 
@@ -26,6 +26,11 @@
 - 001–004: original v1.3.0 migration SQL retained unchanged.
 - 005: append-only A1 discovery observations.
 - 006: append-only A13 assessments and snapshot decisions.
+- 007: bind A13 decisions to exact snapshot content hashes.
+- 008: append-only A13 lifecycle, retention governance and raw-response links.
+- 009: preserve every A6 candle-to-raw-response/source-record relationship, including backfill of existing candles.
+- 010: bind every A13 evidence record to exact raw-response/source-record coordinates.
+- 011: persist immutable collection-run source-record membership receipts and publication-failure recovery markers.
 - Runner checksum-checks all applied migrations and refuses checksum drift.
 
 ## Verification
@@ -37,7 +42,7 @@ python -m unittest discover -s tests -v
 python -m compileall -q rooibos_collectors rooibos_a1 rooibos_a2 rooibos_a6 rooibos_a13 rooibos_db rooibos_integrations
 ```
 
-No provider-specific Moby adapters, endpoint approvals, network client, credentials, Chart Engine wiring, agent runtime wiring, or trading capabilities are included. A6 MET fixture mapping remains blocked pending genuine fixture evidence. A13's production source policy registry remains unconfigured. This is a tested integration seam, not end-to-end production acceptance.
+An explicit-schema Moby parallel-array OHLCV decoder is included, but its response envelope, field names, timestamp unit, volume denomination and candle-status mapping remain unconfigured pending genuine fixture evidence. No endpoint approvals, network client, credentials, Chart Engine wiring, agent runtime wiring, or trading capabilities are enabled. A13's production source policy registry remains unconfigured. This is a tested integration seam, not end-to-end production acceptance.
 
 ## Chart Engine gated reader (v1.5.0)
 
@@ -95,3 +100,69 @@ The actual Alpha/Beta/Gamma runtime source and deployment topology were not supp
 
 
 A13 lifecycle and retention governance is specified in `docs/A13_SNAPSHOT_LIFECYCLE_GOVERNANCE.md`. Migration 008 adds append-only publication/supersession/withdrawal, legal-hold, retention-policy and raw-evidence linkage records. Expiry does not delete evidence.
+
+
+## Common A1/A2/A6 processing pipeline (incremental)
+
+The shared collector framework now has provider-neutral processing entry points
+for all three data families:
+
+- `process_a6_raw_response()`: reads the immutable captured response, invokes
+  an explicit provider decoder, normalises and persists A6 candles, then
+  publishes through A13. It currently requires exactly one captured response
+  per run and rejects multi-response runs before parsing or persistence.
+  Although the generic framework can capture multiple requests/responses,
+  A6 aggregation is deliberately not inferred: pagination, page ordering,
+  overlap/deduplication and completeness rules must be established from a
+  genuine provider contract and fixture before multi-response publication is enabled.
+- `process_a2_raw_response()`: binds decoded metric inputs to captured
+  provenance, normalises and persists A2 observations, then publishes through
+  A13. It requires exactly one captured response per run and rejects
+  multi-response runs before decoding or persistence; aggregation is not
+  implemented.
+- `process_a1_raw_response()`: verifies decoded discovery-observation
+  provenance, batch-persists A1 records atomically, then publishes through
+  A13. It likewise requires exactly one captured response per run and rejects
+  multi-response runs before decoding or persistence; aggregation is not
+  implemented.
+
+A1, A2 and A6 publication now share one SQLite write transaction spanning
+A13 assessment, decision, raw-evidence links, lifecycle registration, final
+read-gate verification and the collector's terminal run-state update. The
+pipeline acquires `BEGIN IMMEDIATE` before publication and passes that active
+connection to `complete_after_a13_publication()`. A concurrent cancellation
+cannot split a committed A13 publication from run completion; if the final
+authorization gate fails, the publication and run-state changes roll back
+together. A quarantined decision remains auditable but is not registered or
+exposed to consumers. Parser/normalizer errors and provenance mismatches fail
+the run closed.
+
+Collector completion is no longer an ordinary framework transition.
+`transition(..., "completed")` is rejected; pipelines must supply the A13
+GateGrant and exact evidence records to `complete_after_a13_publication()`.
+That method re-runs the A13 read gate, verifies every record belongs to the
+same collection run and that its raw response has matching run/source/endpoint
+metadata, then marks the run complete within the publication transaction.
+A1 and A2 storage acquire a SQLite write lock before checking run state.
+Both allow exact idempotent replay while a run is validating, but reject any new
+observation after validation begins; terminal runs reject all new writes. This
+prevents late records from appearing after the A13 snapshot membership has been
+established. A1 batches and A2 metric fan-out remain transactionally atomic.
+
+Provider decoders are explicit injected functions. They only transform an
+already-captured payload into the relevant provider-neutral input model; they
+do not perform network requests. Endpoint allowlisting, request tickets and
+raw capture remain the responsibility of `CollectorFramework`.
+
+This is an implementation seam, not yet an approved production collector.
+No Moby endpoint mapping, live network adapter, credential handling, or
+production source policy is enabled. Synthetic end-to-end regression tests now
+cover A1 and A2 capture, decoding, complete source-record coverage, provenance
+binding, persistence, A13 assessment/publication and successful run completion.
+A1 and A2 incomplete-source coverage and mismatched raw-response provenance are
+tested to fail before persistence/publication. Both pipelines also have tests
+showing invalid A13 source assessments are quarantined without lifecycle or raw
+evidence publication links. A6 has corresponding full-path publication,
+identity, source-coverage, quarantine and rollback tests. These are synthetic
+acceptance results only; genuine provider fixtures, source mapping approval and
+deployment acceptance remain outstanding.

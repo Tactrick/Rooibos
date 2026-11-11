@@ -163,7 +163,15 @@ def normalise_records(records: Iterable[Mapping[str, Any]], context: ParseContex
     result.input_sha256 = hashlib.sha256(_canonical_json(materialised).encode()).hexdigest()
     candidates: list[Candle] = []
 
-    for index, row in enumerate(materialised):
+    seen_source_indices: set[int] = set()
+    for position, row in enumerate(materialised):
+        source_index = row.get("source_record_index", position)
+        if isinstance(source_index, bool) or not isinstance(source_index, int) or source_index < 0:
+            raise ParserError("source_record_index must be a non-negative integer")
+        if source_index in seen_source_indices:
+            raise ParserError(f"Duplicate source_record_index: {source_index}")
+        seen_source_indices.add(source_index)
+        index = source_index
         missing = [name for name in REQUIRED_FIELDS if name not in row]
         if missing:
             raise ParserError(f"Record {index} missing required fields: {', '.join(missing)}")
@@ -237,14 +245,17 @@ def assess_completeness(result: ParseResult, expected_count: int = 100) -> dict[
         raise ValueError("expected_count must be at least 1")
     candles = result.candles
     timestamps = sorted({c.open_time_ms for c in candles})
+    closed = [c for c in candles if c.candle_status == "closed"]
+    closed_timestamps = sorted({c.open_time_ms for c in closed})
     interval_ms = INTERVAL_MS["15m"]
     gaps = []
-    for left, right in zip(timestamps, timestamps[1:]):
+    # Completeness is specifically a run of closed candles. A forming or
+    # unconfirmed candle must never bridge a gap between confirmed records.
+    for left, right in zip(closed_timestamps, closed_timestamps[1:]):
         if right - left > interval_ms:
             gaps.append({"after_ms": left, "before_ms": right, "missing_intervals": (right - left) // interval_ms - 1})
-    closed = [c for c in candles if c.candle_status == "closed"]
-    unique_closed = len({c.open_time_ms for c in closed})
-    consecutive = len(timestamps) >= 1 and not gaps
+    unique_closed = len(closed_timestamps)
+    consecutive = len(closed_timestamps) >= 1 and not gaps
     coverage_ok = unique_closed >= expected_count and consecutive and result.conflict_count == 0 and result.rejected_count == 0
     return {
         "expected_count": expected_count,

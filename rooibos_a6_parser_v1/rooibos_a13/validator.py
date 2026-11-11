@@ -1,5 +1,6 @@
 """Independent, fail-closed A13 quality validation. No network, credentials or trading."""
 from datetime import datetime
+import math
 from typing import Mapping, Iterable
 from .models import EvidenceRecord, SourcePolicy, Finding, RecordAssessment, A13ValidationError, canonical_hash
 
@@ -53,20 +54,40 @@ def assess_record(record: EvidenceRecord, source_policies: Mapping[str, SourcePo
 
     p = record.payload if isinstance(record.payload, Mapping) else {}
     if record.dataset_type == "a1_discovery":
-        if not p.get("mint") or p.get("mint") != record.mint:
+        if p.get("mint") != record.mint:
             errors.append(_finding("a1_mint_mismatch", "error", "A1 payload mint must exactly match the record identity; case is significant."))
-        if p.get("chain") and p.get("chain") != record.chain:
-            errors.append(_finding("a1_chain_mismatch", "error", "A1 payload chain conflicts with record identity."))
+        if p.get("chain") != record.chain:
+            errors.append(_finding("a1_chain_mismatch", "error", "A1 payload chain must exactly match the record identity."))
+        for field in ("symbol", "name", "creator", "created_at", "first_seen_at", "launchpad", "website"):
+            if field in p and p[field] is not None and not isinstance(p[field], str):
+                errors.append(_finding("a1_invalid_" + field, "error", f"A1 {field} metadata must be text or NULL."))
+        decimals = p.get("decimals")
+        if decimals is not None and (
+            isinstance(decimals, bool) or not isinstance(decimals, int) or not 0 <= decimals <= 255
+        ):
+            errors.append(_finding("a1_invalid_decimals", "error", "A1 decimals must be an integer from 0 to 255."))
+        social_links = p.get("social_links")
+        if social_links is not None and not isinstance(social_links, Mapping):
+            errors.append(_finding("a1_invalid_social_links", "error", "A1 social_links must be an object or NULL."))
         # Metadata is optional. Missing fields are not evidence of a defect.
-        if "symbol" not in p and "name" not in p:
+        if not p.get("symbol") and not p.get("name"):
             warnings.append(_finding("a1_sparse_metadata", "warning", "Discovery has no symbol or name; token identity remains the chain and mint."))
     elif record.dataset_type == "a2_market":
+        from rooibos_a2.normalizer import METRIC_UNITS
         required = ("metric", "unit", "measurement_kind", "market_scope")
         for key in required:
             if key not in p or p[key] is None:
                 errors.append(_finding("a2_missing_" + key, "error", f"A2 market observation requires {key}."))
-        if p.get("measurement_kind") not in (None, "observed", "estimated", "unknown"):
+        metric = p.get("metric")
+        expected_unit = METRIC_UNITS.get(metric) if isinstance(metric, str) else None
+        if expected_unit is None:
+            errors.append(_finding("a2_unknown_metric", "error", "A2 metric is not present in the versioned metric registry."))
+        elif p.get("unit") != expected_unit:
+            errors.append(_finding("a2_metric_unit_mismatch", "error", "A2 unit does not match the registered metric unit."))
+        if p.get("measurement_kind") not in ("observed", "estimated", "unknown"):
             errors.append(_finding("a2_invalid_measurement_kind", "error", "A2 measurement_kind is not recognized."))
+        if p.get("market_scope") not in ("token_aggregated", "pool_specific", "unknown"):
+            errors.append(_finding("a2_invalid_market_scope", "error", "A2 market_scope is not recognized."))
         value_status = p.get("value_status", "present")
         if "value" not in p:
             errors.append(_finding("a2_missing_value", "error", "A2 market observation must carry a value or explicit missingness."))
@@ -74,28 +95,58 @@ def assess_record(record: EvidenceRecord, source_policies: Mapping[str, SourcePo
             errors.append(_finding("a2_invalid_value_status", "error", "A2 value_status is not recognized."))
         value = p.get("value")
         if value_status == "present":
-            if isinstance(value, bool) or not isinstance(value, (int, float, str)):
-                errors.append(_finding("a2_invalid_value", "error", "Present A2 values must be numeric or text according to the metric registry."))
-            if isinstance(value, str) and p.get("unit") not in ("text", "address"):
-                errors.append(_finding("a2_text_value_unit_mismatch", "error", "Text A2 values require a text or address unit."))
-            if isinstance(value, (int, float)) and not isinstance(value, bool) and p.get("unit") in ("text", "address"):
-                errors.append(_finding("a2_numeric_value_unit_mismatch", "error", "Text/address A2 units cannot carry numeric values."))
+            if expected_unit in ("text", "address"):
+                if not isinstance(value, str) or not value.strip():
+                    errors.append(_finding("a2_invalid_text_value", "error", "Registered text/address metrics require non-empty text."))
+            else:
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+                    errors.append(_finding("a2_invalid_numeric_value", "error", "Registered numeric metrics require finite numeric values."))
+                elif float(value) < 0:
+                    errors.append(_finding("a2_negative_value", "error", "A2 market metrics cannot be negative."))
+                elif metric == "price" and float(value) <= 0:
+                    errors.append(_finding("a2_nonpositive_price", "error", "A2 token price must be positive."))
         elif value is not None:
             errors.append(_finding("a2_missingness_value_mismatch", "error", "Non-present A2 values must be NULL while preserving their explicit status."))
+        window = p.get("window_seconds")
+        if window is not None and (isinstance(window, bool) or not isinstance(window, int) or window <= 0):
+            errors.append(_finding("a2_invalid_window", "error", "A2 measurement window must be a positive integer number of seconds."))
         if p.get("measurement_kind") == "unknown" and value is not None:
             warnings.append(_finding("a2_unknown_with_value", "warning", "Unknown measurement kind has a value; review semantics."))
-        if p.get("market_scope") == "pool_specific" and not p.get("market_id"):
-            errors.append(_finding("a2_pool_without_market", "error", "Pool-specific observations require a market/pool identity."))
+        if p.get("market_scope") == "pool_specific" and not (p.get("market_id") or p.get("pool_address")):
+            errors.append(_finding("a2_pool_without_market", "error", "Pool-specific observations require a market or pool identity."))
     elif record.dataset_type == "a6_ohlcv":
         required = ("open_time_ms", "open", "high", "low", "close", "volume", "interval_ms", "candle_status")
         for key in required:
             if key not in p or p[key] is None:
                 errors.append(_finding("a6_missing_" + key, "error", f"A6 candle requires {key}."))
         numeric = ("open", "high", "low", "close", "volume")
-        if all(k in p and isinstance(p[k], (int, float)) and not isinstance(p[k], bool) for k in numeric):
-            o, h, l, c, v = (float(p[k]) for k in numeric)
-            if min(o, h, l, c, v) < 0 or h < max(o, c, l) or l > min(o, c, h):
-                errors.append(_finding("a6_invalid_ohlcv_relationship", "error", "OHLC values violate non-negative/high-low consistency."))
+        numeric_valid = True
+        for key in numeric:
+            value = p.get(key)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+                errors.append(_finding("a6_invalid_" + key, "error", f"A6 {key} must be a finite numeric value."))
+                numeric_valid = False
+        for key in ("open", "high", "low", "close"):
+            value = p.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value)) and value <= 0:
+                errors.append(_finding("a6_nonpositive_price", "error", f"A6 {key} price must be positive."))
+        volume = p.get("volume")
+        if isinstance(volume, (int, float)) and not isinstance(volume, bool) and math.isfinite(float(volume)) and volume < 0:
+            errors.append(_finding("a6_negative_volume", "error", "A6 volume must be non-negative."))
+        if numeric_valid:
+            o, h, l, close, _volume = (float(p[k]) for k in numeric)
+            if h < max(o, close, l) or l > min(o, close, h):
+                errors.append(_finding("a6_invalid_ohlcv_relationship", "error", "OHLC values violate high/low consistency."))
+        interval_ms = p.get("interval_ms")
+        if isinstance(interval_ms, bool) or not isinstance(interval_ms, int) or interval_ms <= 0:
+            errors.append(_finding("a6_invalid_interval", "error", "A6 interval_ms must be a positive integer."))
+        open_time_ms = p.get("open_time_ms")
+        if isinstance(open_time_ms, bool) or not isinstance(open_time_ms, int) or open_time_ms <= 0:
+            errors.append(_finding("a6_invalid_open_time", "error", "A6 open_time_ms must be a positive integer."))
+        if (isinstance(interval_ms, int) and not isinstance(interval_ms, bool) and interval_ms > 0
+                and isinstance(open_time_ms, int) and not isinstance(open_time_ms, bool) and open_time_ms > 0
+                and open_time_ms % interval_ms != 0):
+            errors.append(_finding("a6_timestamp_alignment", "error", "Candle open time is not aligned to the declared interval."))
         if p.get("candle_status") not in (None, "closed", "forming", "unknown"):
             errors.append(_finding("a6_invalid_candle_status", "error", "candle_status must be closed, forming or unknown."))
         if p.get("candle_status") == "forming":
@@ -104,8 +155,6 @@ def assess_record(record: EvidenceRecord, source_policies: Mapping[str, SourcePo
             warnings.append(_finding("a6_volume_unit_unknown", "warning", "Volume unit is not declared; do not compare as if units match."))
         if p.get("candle_status") == "unknown":
             warnings.append(_finding("a6_candle_status_unknown", "warning", "Candle closure is unconfirmed; it must not be treated as a closed candle."))
-        if isinstance(p.get("interval_ms"), int) and isinstance(p.get("open_time_ms"), int) and p["interval_ms"] > 0 and p["open_time_ms"] % p["interval_ms"] != 0:
-            warnings.append(_finding("a6_timestamp_alignment", "warning", "Candle open time is not aligned to the declared interval."))
 
     status = "rejected" if errors else ("valid_with_warnings" if warnings else "valid")
     return RecordAssessment(record.record_id, status, tuple(errors + warnings), assessed_at)

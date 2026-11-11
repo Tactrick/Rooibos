@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 import sqlite3
 import sys
 import tempfile
@@ -11,8 +12,10 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(DB_ROOT))
 
 from rooibos_db.database import initialize_database, check_integrity
-from rooibos_a6.parser import ParseContext, normalise_records
+from rooibos_a6.parser import ParseContext, ParseResult, normalise_records
 from rooibos_a6.storage import store_raw_response, persist_parse_result
+from rooibos_integrations.a13_projection import project_a6_from_storage, publish_a6_snapshot_from_storage
+from rooibos_a13.models import SourcePolicy
 
 
 class A6StorageTests(unittest.TestCase):
@@ -41,7 +44,7 @@ class A6StorageTests(unittest.TestCase):
         c.commit(); c.close()
         self.context = ParseContext(
             chain='solana',asset_id='asset1',mint_address='MintABC',interval='15m',source_id='moby',
-            endpoint_id='ohlcv',collection_run_id='run1',raw_response_ref=self.raw_id,
+            endpoint_id='ohlcv',collection_run_id='run1',raw_response_ref=self.raw_id, volume_unit='base_token',
         )
         self.records = [
             {"timestamp_ms": 1794225600000, "open": 1, "high": 1.2, "low": .9, "close": 1.1, "volume": 10, "candle_status":"closed"},
@@ -66,6 +69,37 @@ class A6StorageTests(unittest.TestCase):
         self.assertEqual(event[0], 'completed')
         self.assertIn('output_sha256', event[1])
         self.assertEqual(c.execute("SELECT status FROM collection_runs WHERE run_id='run1'").fetchone()[0], 'normalised')
+        c.close()
+
+    def test_original_source_indices_survive_storage_and_a13_projection(self):
+        # Deliberately supply newest-first records while their source indices
+        # identify their positions in the immutable provider response.
+        records = [
+            dict(self.records[1], source_record_index=1),
+            dict(self.records[0], source_record_index=0),
+        ]
+        result = self.parse(records)
+        persist_parse_result(self.db, result=result, raw_response_id=self.raw_id)
+
+        c = sqlite3.connect(self.db)
+        c.row_factory = sqlite3.Row
+        rows = c.execute(
+            "SELECT candle_id,open_time_ms,source_record_index FROM ohlcv_candles ORDER BY open_time_ms"
+        ).fetchall()
+        self.assertEqual(
+            [(row["open_time_ms"], row["source_record_index"]) for row in rows],
+            [(1794225600000, 0), (1794226500000, 1)],
+        )
+        projected = [
+            record
+            for row in rows
+            for record in project_a6_from_storage(c, row["candle_id"])
+        ]
+        self.assertEqual(
+            {(record.payload["open_time_ms"], record.source_record_index) for record in projected},
+            {(1794225600000, 0), (1794226500000, 1)},
+        )
+        self.assertTrue(all(record.raw_response_id == self.raw_id for record in projected))
         c.close()
 
     def test_replay_is_idempotent(self):
@@ -133,6 +167,285 @@ class A6StorageTests(unittest.TestCase):
         persist_parse_result(self.db, result=self.parse(), raw_response_id=self.raw_id)
         self.assertTrue(check_integrity(self.db)['ok'])
 
+
+
+    def test_repeated_identical_candle_retains_all_raw_evidence_for_a13(self):
+        first = persist_parse_result(self.db, result=self.parse(), raw_response_id=self.raw_id)
+        self.assertEqual(first["inserted_count"], 2)
+
+        c = sqlite3.connect(self.db)
+        c.execute("""INSERT INTO collection_runs(
+            run_id,collector_id,source_id,endpoint_id,collector_version,requested_scope_json,started_at,status
+        ) VALUES ('run2','A6','moby','ohlcv','1.0.0','{}','2026-11-09T10:01:00Z','collecting')""")
+        c.commit()
+        c.close()
+
+        second_raw_id = "raw2"
+        store_raw_response(
+            self.db, raw_response_id=second_raw_id, run_id="run2", source_id="moby",
+            endpoint_id="ohlcv", payload={"synthetic_fixture": True, "candles": 2},
+            request_params={"mint":"MintABC","interval":"15m","limit":2},
+            retrieved_at="2026-11-09T10:01:01Z", http_status=200,
+        )
+        c = sqlite3.connect(self.db)
+        c.execute("UPDATE collection_runs SET status='parsed' WHERE run_id='run2'")
+        c.commit()
+        c.close()
+
+        context2 = ParseContext(
+            chain="solana", asset_id="asset1", mint_address="MintABC", interval="15m",
+            source_id="moby", endpoint_id="ohlcv", collection_run_id="run2",
+            raw_response_ref=second_raw_id, volume_unit="base_token",
+        )
+        result2 = normalise_records(self.records, context2)
+        second = persist_parse_result(self.db, result=result2, raw_response_id=second_raw_id)
+        self.assertEqual(second["inserted_count"], 0)
+        self.assertEqual(second["existing_identical_count"], 2)
+
+        c = sqlite3.connect(self.db)
+        c.row_factory = sqlite3.Row
+        candle_id = c.execute("SELECT candle_id FROM ohlcv_candles ORDER BY open_time_ms LIMIT 1").fetchone()["candle_id"]
+        evidence = c.execute(
+            "SELECT raw_response_id,run_id,source_record_index FROM a6_candle_evidence_links WHERE candle_id=? ORDER BY raw_response_id",
+            (candle_id,),
+        ).fetchall()
+        self.assertEqual({row["raw_response_id"] for row in evidence}, {"raw1", "raw2"})
+        projected = project_a6_from_storage(c, candle_id)
+        self.assertEqual({record.raw_response_id for record in projected}, {"raw1", "raw2"})
+        self.assertEqual(len(projected), 2)
+
+        all_candle_ids = [row["candle_id"] for row in c.execute(
+            "SELECT candle_id FROM ohlcv_candles ORDER BY open_time_ms"
+        )]
+        records, assessments, decision, grant = publish_a6_snapshot_from_storage(
+            c, all_candle_ids, snapshot_id="a6-repeat-published",
+            source_policies={"moby": SourcePolicy("moby", ("ohlcv",), True)},
+            assessed_at="2026-11-09T10:02:00Z",
+            decided_at="2026-11-09T10:03:00Z",
+            effective_at="2026-11-09T10:04:00Z",
+            actor_id="test-governance", reason="publish repeated synthetic observations",
+        )
+        self.assertIsNotNone(grant)
+        linked_raw = {row[0] for row in c.execute(
+            "SELECT raw_response_id FROM a13_snapshot_raw_links WHERE snapshot_id=?",
+            ("a6-repeat-published",),
+        )}
+        self.assertEqual(linked_raw, {"raw1", "raw2"})
+        self.assertEqual({record.raw_response_id for record in records}, {"raw1", "raw2"})
+        c.close()
+
+
+    def test_conflicting_candle_from_second_response_is_preserved_without_replacing_or_misattributing(self):
+        first = persist_parse_result(self.db, result=self.parse(), raw_response_id=self.raw_id)
+        self.assertEqual(first["inserted_count"], 2)
+
+        c = sqlite3.connect(self.db)
+        c.execute("""INSERT INTO collection_runs(
+            run_id,collector_id,source_id,endpoint_id,collector_version,requested_scope_json,started_at,status
+        ) VALUES ('run2','A6','moby','ohlcv','1.0.0','{}','2026-11-09T10:01:00Z','collecting')""")
+        c.commit()
+        c.close()
+
+        second_raw_id = "raw2-conflict"
+        store_raw_response(
+            self.db, raw_response_id=second_raw_id, run_id="run2", source_id="moby",
+            endpoint_id="ohlcv", payload={"synthetic_fixture": True, "variant": "conflicting"},
+            request_params={"mint":"MintABC","interval":"15m","limit":2},
+            retrieved_at="2026-11-09T10:01:01Z", http_status=200,
+        )
+        c = sqlite3.connect(self.db)
+        c.execute("UPDATE collection_runs SET status='parsed' WHERE run_id='run2'")
+        c.commit()
+        c.close()
+
+        context2 = ParseContext(
+            chain="solana", asset_id="asset1", mint_address="MintABC", interval="15m",
+            source_id="moby", endpoint_id="ohlcv", collection_run_id="run2",
+            raw_response_ref=second_raw_id, volume_unit="base_token",
+        )
+        conflicting_records = [dict(self.records[0], close=1.15, source_record_index=0),
+                               dict(self.records[1], source_record_index=1)]
+        result2 = normalise_records(conflicting_records, context2)
+        outcome = persist_parse_result(self.db, result=result2, raw_response_id=second_raw_id)
+
+        self.assertEqual(outcome["inserted_count"], 0)
+        self.assertEqual(outcome["storage_conflict_count"], 1)
+        c = sqlite3.connect(self.db)
+        c.row_factory = sqlite3.Row
+        canonical = c.execute(
+            "SELECT close,raw_response_id,source_record_index FROM ohlcv_candles WHERE open_time_ms=?",
+            (1794225600000,),
+        ).fetchone()
+        self.assertEqual((canonical["close"], canonical["raw_response_id"], canonical["source_record_index"]),
+                         (1.1, self.raw_id, 0))
+
+        # A conflicting observation remains attached to its own immutable raw
+        # response and normalization manifest, never linked as evidence for
+        # the unchanged canonical candle.
+        links = c.execute(
+            "SELECT raw_response_id,source_record_index FROM a6_candle_evidence_links "
+            "WHERE candle_id=(SELECT candle_id FROM ohlcv_candles WHERE open_time_ms=?)",
+            (1794225600000,),
+        ).fetchall()
+        self.assertEqual([(row["raw_response_id"], row["source_record_index"]) for row in links],
+                         [(self.raw_id, 0)])
+        manifest = json.loads(c.execute(
+            "SELECT details_json FROM normalization_events WHERE raw_response_id=?",
+            (second_raw_id,),
+        ).fetchone()["details_json"])
+        self.assertEqual(manifest["storage"]["storage_conflict_count"], 1)
+        conflicting_variant = next(candle for candle in manifest["candles"]
+                                   if candle["open_time_ms"] == 1794225600000)
+        self.assertEqual(conflicting_variant["close"], 1.15)
+        self.assertEqual(conflicting_variant["source_record_index"], 0)
+        canonical_id = c.execute(
+            "SELECT candle_id FROM ohlcv_candles WHERE open_time_ms=?", (1794225600000,)
+        ).fetchone()["candle_id"]
+        self.assertEqual(
+            {record.raw_response_id for record in project_a6_from_storage(c, canonical_id)},
+            {self.raw_id},
+        )
+        c.close()
+
+
+    def test_a6_storage_to_a13_publication_and_read_gate_uses_all_evidence(self):
+        persist_parse_result(self.db, result=self.parse(), raw_response_id=self.raw_id)
+        c = sqlite3.connect(self.db)
+        c.row_factory = sqlite3.Row
+        candle_ids = [row["candle_id"] for row in c.execute(
+            "SELECT candle_id FROM ohlcv_candles ORDER BY open_time_ms"
+        )]
+        records, assessments, decision, grant = publish_a6_snapshot_from_storage(
+            c, candle_ids, snapshot_id="a6-storage-published",
+            source_policies={"moby": SourcePolicy("moby", ("ohlcv",), True)},
+            assessed_at="2026-11-09T10:02:00Z",
+            decided_at="2026-11-09T10:03:00Z",
+            effective_at="2026-11-09T10:04:00Z",
+            actor_id="test-governance", reason="publish synthetic A6 fixture",
+        )
+        self.assertIn(decision.dataset_status, ("approved_for_research", "approved_with_warnings"))
+        self.assertIsNotNone(grant)
+        self.assertEqual(set(grant.record_ids), {record.record_id for record in records})
+        expected_raw = {record.raw_response_id for record in records}
+        linked_raw = {row[0] for row in c.execute(
+            "SELECT raw_response_id FROM a13_snapshot_raw_links WHERE snapshot_id=?",
+            ("a6-storage-published",),
+        )}
+        self.assertEqual(linked_raw, expected_raw)
+        self.assertEqual(expected_raw, {"raw1"})
+        c.close()
+
+
+    def test_a13_publication_rolls_back_everything_if_read_gate_fails_after_lifecycle_registration(self):
+        persist_parse_result(self.db, result=self.parse(), raw_response_id=self.raw_id)
+        c = sqlite3.connect(self.db)
+        c.row_factory = sqlite3.Row
+        candle_ids = [row["candle_id"] for row in c.execute(
+            "SELECT candle_id FROM ohlcv_candles ORDER BY open_time_ms"
+        )]
+
+        # Inject failure at the final gate, after assessment, decision,
+        # lifecycle registration and raw-evidence linking have been staged.
+        from unittest.mock import patch
+        with patch("rooibos_a13.read_gate.authorize_snapshot",
+                   side_effect=RuntimeError("injected final read-gate failure")):
+            with self.assertRaisesRegex(RuntimeError, "injected final read-gate failure"):
+                publish_a6_snapshot_from_storage(
+                    c, candle_ids, snapshot_id="a6-atomic-failure",
+                    source_policies={"moby": SourcePolicy("moby", ("ohlcv",), True)},
+                    assessed_at="2026-11-09T10:02:00Z",
+                    decided_at="2026-11-09T10:03:00Z",
+                    effective_at="2026-11-09T10:04:00Z",
+                    actor_id="test-governance", reason="exercise atomic rollback",
+                )
+
+        # Assessments are keyed by record, not snapshot; compare their
+        # global count as this isolated fixture has no prior A13 assessments.
+        self.assertEqual(c.execute(
+            "SELECT COUNT(*) FROM a13_record_assessments"
+        ).fetchone()[0], 0, "assessment rows survived failed publication")
+        for table in (
+            "a13_snapshot_decisions",
+            "a13_snapshot_lifecycle_events",
+            "a13_snapshot_raw_links",
+        ):
+            count = c.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE snapshot_id=?",
+                ("a6-atomic-failure",),
+            ).fetchone()[0]
+            self.assertEqual(count, 0, f"{table} retained partial publication rows")
+        c.close()
+
+    def test_duplicate_source_record_index_rejected_before_any_write(self):
+        records = [
+            dict(self.records[0], source_record_index=0),
+            dict(self.records[1], source_record_index=0),
+        ]
+        # The parser itself rejects duplicate indexes. Construct a deliberately
+        # malformed ParseResult to exercise the independent storage boundary.
+        parsed = self.parse()
+        result = ParseResult(
+            candles=[parsed.candles[0], replace(parsed.candles[1], source_record_index=0)],
+            findings=parsed.findings, received_count=parsed.received_count,
+            decoded_count=parsed.decoded_count, rejected_count=parsed.rejected_count,
+            duplicate_count=parsed.duplicate_count, conflict_count=parsed.conflict_count,
+            input_sha256=parsed.input_sha256, output_sha256=parsed.output_sha256,
+            status=parsed.status,
+        )
+        with self.assertRaisesRegex(ValueError, "must be unique"):
+            persist_parse_result(self.db, result=result, raw_response_id=self.raw_id)
+        c = sqlite3.connect(self.db)
+        self.assertEqual(c.execute("SELECT COUNT(*) FROM ohlcv_candles").fetchone()[0], 0)
+        self.assertEqual(c.execute("SELECT COUNT(*) FROM a6_candle_evidence_links").fetchone()[0], 0)
+        self.assertEqual(c.execute("SELECT COUNT(*) FROM normalization_events").fetchone()[0], 0)
+        c.close()
+
+    def test_asset_identity_is_checked_on_identical_candle_replay(self):
+        persist_parse_result(self.db, result=self.parse(), raw_response_id=self.raw_id)
+        wrong_context = ParseContext(
+            chain="solana", asset_id="wrong-asset-id", mint_address="MintABC", interval="15m",
+            source_id="moby", endpoint_id="ohlcv", collection_run_id="run1",
+            raw_response_ref=self.raw_id, volume_unit="base_token",
+        )
+        wrong_result = normalise_records(self.records, wrong_context)
+        with self.assertRaisesRegex(ValueError, "asset_id does not match"):
+            persist_parse_result(self.db, result=wrong_result, raw_response_id=self.raw_id)
+        c = sqlite3.connect(self.db)
+        self.assertEqual(c.execute("SELECT COUNT(*) FROM a6_candle_evidence_links").fetchone()[0], 2)
+        c.close()
+
+    def test_market_identity_is_checked_on_identical_candle_replay(self):
+        c = sqlite3.connect(self.db)
+        c.execute("INSERT INTO assets(asset_id,chain,token_address,symbol) VALUES ('asset2','solana','OtherMint','OTH')")
+        c.execute("INSERT INTO markets(market_id,asset_id,source_id,market_address) VALUES ('market1','asset1','moby','PoolABC')")
+        c.commit()
+        c.close()
+
+        market_context = replace(self.context, market_id="market1")
+        parsed = normalise_records(self.records, market_context)
+        persist_parse_result(self.db, result=parsed, raw_response_id=self.raw_id)
+
+        # Simulate a corrupted/mis-associated market registry row while keeping
+        # the canonical candle and its evidence link intact.
+        c = sqlite3.connect(self.db)
+        c.execute("UPDATE markets SET asset_id='asset2' WHERE market_id='market1'")
+        c.commit()
+        before = c.execute(
+            "SELECT COUNT(*) FROM a6_candle_evidence_links"
+        ).fetchone()[0]
+        c.close()
+
+        with self.assertRaisesRegex(ValueError, "Market identity is not registered for this asset"):
+            persist_parse_result(self.db, result=parsed, raw_response_id=self.raw_id)
+
+        c = sqlite3.connect(self.db)
+        self.assertEqual(c.execute(
+            "SELECT COUNT(*) FROM a6_candle_evidence_links"
+        ).fetchone()[0], before)
+        self.assertEqual(c.execute(
+            "SELECT COUNT(*) FROM normalization_events"
+        ).fetchone()[0], 1, "failed replay must not persist a normalization event")
+        c.close()
 
 if __name__ == '__main__':
     unittest.main()

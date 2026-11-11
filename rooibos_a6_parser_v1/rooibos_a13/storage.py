@@ -20,11 +20,34 @@ CREATE TRIGGER IF NOT EXISTS trg_a13_snapshots_no_delete BEFORE DELETE ON a13_sn
 def apply_migration_006(conn: sqlite3.Connection):
     conn.executescript(DDL); conn.commit()
 
-def store_assessment(conn: sqlite3.Connection, assessment: RecordAssessment, assessment_id: str, assessment_hash: str) -> bool:
-    cur = conn.execute("INSERT OR IGNORE INTO a13_record_assessments VALUES (?,?,?,?,?,?,?)", (assessment_id, assessment.record_id, assessment.status, json.dumps([asdict(x) for x in assessment.findings], sort_keys=True), assessment.assessed_at, assessment.validator_version, assessment_hash))
-    conn.commit(); return cur.rowcount == 1
+def store_assessment(conn: sqlite3.Connection, assessment: RecordAssessment, assessment_id: str, assessment_hash: str, *, commit: bool = True) -> bool:
+    values = (
+        assessment_id, assessment.record_id, assessment.status,
+        json.dumps([asdict(x) for x in assessment.findings], sort_keys=True),
+        assessment.assessed_at, assessment.validator_version, assessment_hash,
+    )
+    cur = conn.execute(
+        "INSERT OR IGNORE INTO a13_record_assessments VALUES (?,?,?,?,?,?,?)",
+        values,
+    )
+    # INSERT OR IGNORE can suppress either a primary-key collision or the
+    # independent unique assessment-hash constraint. Never treat that as an
+    # idempotent retry until the persisted immutable row is proven identical.
+    persisted = conn.execute(
+        """SELECT assessment_id, record_id, status, findings_json,
+                  assessed_at, validator_version, assessment_hash
+           FROM a13_record_assessments WHERE assessment_id=?""",
+        (assessment_id,),
+    ).fetchone()
+    if persisted is None or tuple(persisted) != values:
+        raise ValueError(
+            "assessment_id or assessment_hash already exists with different immutable assessment content"
+        )
+    if commit:
+        conn.commit()
+    return cur.rowcount == 1
 
-def store_decision(conn: sqlite3.Connection, decision: SnapshotDecision) -> bool:
+def store_decision(conn: sqlite3.Connection, decision: SnapshotDecision, *, commit: bool = True) -> bool:
     columns = {row[1] for row in conn.execute("PRAGMA table_info(a13_snapshot_decisions)")}
     snapshot_hash = getattr(decision, "snapshot_hash", "")
     if "snapshot_content_hash" not in columns:
@@ -39,4 +62,5 @@ def store_decision(conn: sqlite3.Connection, decision: SnapshotDecision) -> bool
             raise ValueError("snapshot_id already exists with a different immutable decision")
         return False
     conn.execute("INSERT INTO a13_snapshot_decisions (snapshot_id,dataset_type,record_ids_json,dataset_status,assessments_hash,findings_json,decided_at,policy_version,snapshot_content_hash) VALUES (?,?,?,?,?,?,?,?,?)", values)
-    conn.commit(); return True
+    if commit: conn.commit()
+    return True
