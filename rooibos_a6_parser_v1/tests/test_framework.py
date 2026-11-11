@@ -202,6 +202,7 @@ class CollectorFrameworkTests(unittest.TestCase):
             decided_at='2026-11-09T10:03:00Z',
             effective_at='2026-11-09T10:04:00Z',
             actor_id='test-governance', reason='verify complete A6 publication path',
+            expected_candle_count=2,
         )
         self.assertTrue(outcome.published)
         self.assertEqual(len(outcome.candle_ids), 2)
