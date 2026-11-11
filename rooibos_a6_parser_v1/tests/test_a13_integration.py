@@ -1,6 +1,7 @@
 import sqlite3
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from rooibos_db.database import initialize_database, _connect, MIGRATION_VERSION
@@ -8,12 +9,13 @@ from rooibos_a1.models import DiscoveryContext, normalize_observation as normali
 from rooibos_a1.storage import store_observation as store_a1_observation
 from rooibos_a2.normalizer import MarketMetricInput, MarketObservationInput, normalize_observation as normalize_a2
 from rooibos_a6.parser import ParseContext, normalise_records
-from rooibos_a13.models import SourcePolicy
+from rooibos_a13.models import SourcePolicy, canonical_hash
 from rooibos_a13.models import RecordAssessment, Finding
 from rooibos_a13.storage import store_assessment
 from rooibos_a13.read_gate import authorize_snapshot, snapshot_content_hash, SnapshotAccessDenied
 from rooibos_integrations.a13_projection import project_a1, project_a2, project_a6, assess_and_store_snapshot
 from rooibos_a13.lifecycle import register_snapshot_for_records
+from rooibos_a13.validator import assess_record
 
 MINT = "So11111111111111111111111111111111111111112"
 POLICIES = {"fixture_source": SourcePolicy("fixture_source", ("fixture_endpoint",), True)}
@@ -224,6 +226,34 @@ class A13PipelineIntegrationTests(unittest.TestCase):
                 expected_snapshot_hash=snapshot_content_hash([record]),
                 expected_assessments_hash=decision.assessments_hash,
                 allowed_policy_versions={decision.policy_version}, now="2026-11-09T10:03:00Z")
+
+    def test_a13_independently_rejects_malformed_ohlcv_values(self):
+        context = ParseContext("solana", "asset-a6-validator", MINT, "15m",
+            "fixture_source", "fixture_endpoint", "run-a6-validator", "raw-a6-validator",
+            volume_unit="base_token")
+        parsed = normalise_records([{"timestamp_ms":1794229200000,"open":1.0,
+            "high":1.2,"low":0.9,"close":1.1,"volume":12.0,
+            "candle_status":"closed"}], context)
+        record = project_a6(parsed.candles[0], observed_at="2026-11-09T10:00:00Z")
+        invalid_payloads = (
+            {"open": 0.0},
+            {"high": "1.2"},
+            {"volume": -1.0},
+            {"interval_ms": 0},
+            {"open_time_ms": True},
+            {"open_time_ms": 1794229200001},
+        )
+        for change in invalid_payloads:
+            with self.subTest(change=change):
+                payload = dict(record.payload)
+                payload.update(change)
+                malformed = replace(
+                    record, payload=payload, content_hash=canonical_hash(payload)
+                )
+                assessment = assess_record(
+                    malformed, POLICIES, assessed_at="2026-11-09T10:01:00Z"
+                )
+                self.assertEqual(assessment.status, "rejected")
 
     def test_a13_warnings_are_quarantined_unless_explicitly_allowed(self):
         context = ParseContext("solana", "asset-warning", MINT, "15m",
