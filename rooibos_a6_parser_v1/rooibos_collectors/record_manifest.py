@@ -34,7 +34,9 @@ def store_record_manifest(
         raise ValueError("unsupported collector module for source-record manifest")
     payload = _canonical_membership(source_record_count, membership)
     digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
-    conn.execute("BEGIN IMMEDIATE") if not conn.in_transaction else None
+    owns_transaction = not conn.in_transaction
+    if owns_transaction:
+        conn.execute("BEGIN IMMEDIATE")
     try:
         raw = conn.execute(
             "SELECT run_id FROM raw_responses WHERE raw_response_id=?",
@@ -66,11 +68,11 @@ def store_record_manifest(
                 "VALUES (?,?,?,?,?,?)",
                 (run_id, *values),
             )
-        if conn.in_transaction:
+        if owns_transaction:
             conn.commit()
         return digest
     except Exception:
-        if conn.in_transaction:
+        if owns_transaction:
             conn.rollback()
         raise
 
