@@ -6,6 +6,7 @@ A13 assessment/publication and final run-state gating without network access.
 import sqlite3
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from rooibos_db.database import initialize_database, _connect
@@ -103,6 +104,58 @@ class A1A2CollectorToA13E2ETests(unittest.TestCase):
             self.assertEqual(conn.execute(
                 "SELECT COUNT(*) FROM a13_snapshot_raw_links WHERE snapshot_id='snap-a1-e2e'"
             ).fetchone()[0], 1)
+        finally:
+            conn.close()
+
+    def test_a1_publication_and_completion_share_one_rollback_boundary(self):
+        raw_id = "raw-a1-atomic-completion"
+        run_id = self._capture("A1", {"records":[{"symbol":"ATOMIC"}]}, raw_id)
+
+        def decode(payload, provenance):
+            return [normalize_a1(
+                DiscoveryContext(
+                    "solana", MINT, provenance.source_id, provenance.endpoint_id,
+                    provenance.run_id, provenance.raw_response_id, index,
+                    provenance.retrieved_at, source_record_count=len(payload["records"]),
+                ),
+                row, field_map={"symbol":"symbol"},
+            ) for index, row in enumerate(payload["records"])]
+
+        from rooibos_integrations.a13_projection import publish_a1_snapshot_from_storage as real_publish
+
+        def publish_then_invalidate(conn, *args, **kwargs):
+            self.assertTrue(conn.in_transaction)
+            result = real_publish(conn, *args, **kwargs)
+            # Simulate a state change discovered at the final completion gate.
+            # The shared transaction must roll back the just-staged publication.
+            conn.execute(
+                "UPDATE collection_runs SET status='cancelled' WHERE run_id=?", (run_id,)
+            )
+            return result
+
+        with patch("rooibos_collectors.a1_pipeline.publish_a1_snapshot_from_storage",
+                   side_effect=publish_then_invalidate):
+            with self.assertRaisesRegex(Exception, "validating"):
+                process_a1_raw_response(
+                    self.framework, run_id=run_id, raw_response_id=raw_id,
+                    decode_payload=decode, snapshot_id="snap-a1-atomic-completion",
+                    source_policies=POLICIES, **self._times(),
+                )
+
+        conn = _connect(self.db)
+        try:
+            self.assertEqual(conn.execute(
+                "SELECT status FROM collection_runs WHERE run_id=?", (run_id,)
+            ).fetchone()[0], "failed")
+            for table in (
+                "a13_record_assessments", "a13_snapshot_decisions",
+                "a13_snapshot_lifecycle_events", "a13_snapshot_evidence_links",
+                "a13_snapshot_raw_links",
+            ):
+                self.assertEqual(conn.execute(
+                    f"SELECT COUNT(*) FROM {table} WHERE snapshot_id=?",
+                    ("snap-a1-atomic-completion",),
+                ).fetchone()[0], 0, table)
         finally:
             conn.close()
 
