@@ -37,6 +37,12 @@ class ChartEngineGateTests(unittest.TestCase):
             'approved_for_research', self.assessments_hash, '[]',
             '2026-11-09T10:01:00+00:00', 'a13-governance/0.1.0', self.snapshot_hash))
         self.conn.commit()
+        self.conn.execute('''CREATE TABLE collection_runs (
+            run_id TEXT PRIMARY KEY, source_id TEXT, endpoint_id TEXT)''')
+        self.conn.execute(
+            "INSERT INTO collection_runs VALUES (?,?,?)",
+            ('run-1', 'provider-a', 'ohlcv'),
+        )
         self.conn.execute('''CREATE TABLE raw_responses (
             raw_response_id TEXT PRIMARY KEY, run_id TEXT, source_id TEXT, endpoint_id TEXT)''')
         for i in range(3):
