@@ -116,9 +116,14 @@ for all three data families:
   genuine provider contract and fixture before multi-response publication is enabled.
 - `process_a2_raw_response()`: binds decoded metric inputs to captured
   provenance, normalises and persists A2 observations, then publishes through
-  A13.
+  A13. It requires exactly one captured response per run and rejects
+  multi-response runs before decoding or persistence; aggregation is not
+  implemented.
 - `process_a1_raw_response()`: verifies decoded discovery-observation
-  provenance, batch-persists A1 records atomically, then publishes through A13.
+  provenance, batch-persists A1 records atomically, then publishes through
+  A13. It likewise requires exactly one captured response per run and rejects
+  multi-response runs before decoding or persistence; aggregation is not
+  implemented.
 
 A1, A2 and A6 publication now share one SQLite write transaction spanning
 A13 assessment, decision, raw-evidence links, lifecycle registration, final
