@@ -200,8 +200,9 @@ class SharedCollectorDatabaseRehearsalTests(unittest.TestCase):
                     (snapshot_id, raw_id),
                 ).fetchone()[0], 1)
                 self.assertEqual(conn.execute(
-                    """SELECT COUNT(*) FROM a13_snapshot_evidence_links
-                    WHERE snapshot_id=? AND run_id=?""",
+                    """SELECT COUNT(*) FROM a13_snapshot_evidence_links l
+                    JOIN raw_responses rr ON rr.raw_response_id=l.raw_response_id
+                    WHERE l.snapshot_id=? AND rr.run_id=?""",
                     (snapshot_id, run_id),
                 ).fetchone()[0] > 0, True)
 
