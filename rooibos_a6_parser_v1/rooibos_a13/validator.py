@@ -1,5 +1,6 @@
 """Independent, fail-closed A13 quality validation. No network, credentials or trading."""
 from datetime import datetime
+import math
 from typing import Mapping, Iterable
 from .models import EvidenceRecord, SourcePolicy, Finding, RecordAssessment, A13ValidationError, canonical_hash
 
@@ -92,10 +93,33 @@ def assess_record(record: EvidenceRecord, source_policies: Mapping[str, SourcePo
             if key not in p or p[key] is None:
                 errors.append(_finding("a6_missing_" + key, "error", f"A6 candle requires {key}."))
         numeric = ("open", "high", "low", "close", "volume")
-        if all(k in p and isinstance(p[k], (int, float)) and not isinstance(p[k], bool) for k in numeric):
-            o, h, l, c, v = (float(p[k]) for k in numeric)
-            if min(o, h, l, c, v) < 0 or h < max(o, c, l) or l > min(o, c, h):
-                errors.append(_finding("a6_invalid_ohlcv_relationship", "error", "OHLC values violate non-negative/high-low consistency."))
+        numeric_valid = True
+        for key in numeric:
+            value = p.get(key)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+                errors.append(_finding("a6_invalid_" + key, "error", f"A6 {key} must be a finite numeric value."))
+                numeric_valid = False
+        for key in ("open", "high", "low", "close"):
+            value = p.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value)) and value <= 0:
+                errors.append(_finding("a6_nonpositive_price", "error", f"A6 {key} price must be positive."))
+        volume = p.get("volume")
+        if isinstance(volume, (int, float)) and not isinstance(volume, bool) and math.isfinite(float(volume)) and volume < 0:
+            errors.append(_finding("a6_negative_volume", "error", "A6 volume must be non-negative."))
+        if numeric_valid:
+            o, h, l, close, _volume = (float(p[k]) for k in numeric)
+            if h < max(o, close, l) or l > min(o, close, h):
+                errors.append(_finding("a6_invalid_ohlcv_relationship", "error", "OHLC values violate high/low consistency."))
+        interval_ms = p.get("interval_ms")
+        if isinstance(interval_ms, bool) or not isinstance(interval_ms, int) or interval_ms <= 0:
+            errors.append(_finding("a6_invalid_interval", "error", "A6 interval_ms must be a positive integer."))
+        open_time_ms = p.get("open_time_ms")
+        if isinstance(open_time_ms, bool) or not isinstance(open_time_ms, int) or open_time_ms <= 0:
+            errors.append(_finding("a6_invalid_open_time", "error", "A6 open_time_ms must be a positive integer."))
+        if (isinstance(interval_ms, int) and not isinstance(interval_ms, bool) and interval_ms > 0
+                and isinstance(open_time_ms, int) and not isinstance(open_time_ms, bool) and open_time_ms > 0
+                and open_time_ms % interval_ms != 0):
+            errors.append(_finding("a6_timestamp_alignment", "error", "Candle open time is not aligned to the declared interval."))
         if p.get("candle_status") not in (None, "closed", "forming", "unknown"):
             errors.append(_finding("a6_invalid_candle_status", "error", "candle_status must be closed, forming or unknown."))
         if p.get("candle_status") == "forming":
@@ -104,8 +128,6 @@ def assess_record(record: EvidenceRecord, source_policies: Mapping[str, SourcePo
             warnings.append(_finding("a6_volume_unit_unknown", "warning", "Volume unit is not declared; do not compare as if units match."))
         if p.get("candle_status") == "unknown":
             warnings.append(_finding("a6_candle_status_unknown", "warning", "Candle closure is unconfirmed; it must not be treated as a closed candle."))
-        if isinstance(p.get("interval_ms"), int) and isinstance(p.get("open_time_ms"), int) and p["interval_ms"] > 0 and p["open_time_ms"] % p["interval_ms"] != 0:
-            warnings.append(_finding("a6_timestamp_alignment", "warning", "Candle open time is not aligned to the declared interval."))
 
     status = "rejected" if errors else ("valid_with_warnings" if warnings else "valid")
     return RecordAssessment(record.record_id, status, tuple(errors + warnings), assessed_at)
