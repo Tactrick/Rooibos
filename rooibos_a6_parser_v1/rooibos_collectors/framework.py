@@ -252,6 +252,10 @@ class CollectorFramework:
                 raise InvalidRunTransition("A response can only be captured while the run is collecting")
             request_params = json.loads(request["request_params_json"])
             source_id = request["source_id"]
+            already_captured = conn.execute(
+                "SELECT 1 FROM raw_responses WHERE raw_response_id=?",
+                (raw_response_id,),
+            ).fetchone() is not None
         finally:
             conn.close()
         raw_hash = store_raw_response(
@@ -261,6 +265,11 @@ class CollectorFramework:
             http_status=http_status,response_headers=response_headers,content_type=content_type,
             page_sequence=page_sequence,
         )
+        # store_raw_response enforces exact equality for an existing ID. An
+        # exact retry must not increment response_count or regress a run that
+        # has already advanced beyond raw capture.
+        if already_captured:
+            return raw_hash
         conn = _connect(self.db_path)
         try:
             conn.execute("BEGIN IMMEDIATE")
@@ -269,9 +278,11 @@ class CollectorFramework:
             # run by unconditionally writing raw_captured here.
             updated = conn.execute(
                 """UPDATE collection_runs
-                   SET response_count=response_count+1,status='raw_captured'
+                   SET response_count=(
+                       SELECT COUNT(*) FROM raw_responses WHERE run_id=?
+                   ),status='raw_captured'
                    WHERE run_id=? AND status='collecting'""",
-                (ticket.run_id,),
+                (ticket.run_id, ticket.run_id),
             )
             if updated.rowcount != 1:
                 raise InvalidRunTransition(
