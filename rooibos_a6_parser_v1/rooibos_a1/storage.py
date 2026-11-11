@@ -1,9 +1,10 @@
 """Append-only SQLite persistence for A1, bound to immutable collection evidence."""
 import json
 import sqlite3
+import hashlib
 from dataclasses import asdict
 
-from .models import DiscoveryObservation
+from .models import DiscoveryObservation, validate_context
 
 MIGRATION_VERSION = 5
 
@@ -64,7 +65,31 @@ def store_observation(conn: sqlite3.Connection, obs: DiscoveryObservation, *, co
         conn.execute("BEGIN IMMEDIATE")
     conn.execute("SAVEPOINT a1_store_observation")
     try:
+        if not isinstance(obs, DiscoveryObservation):
+            raise TypeError("A1 storage accepts DiscoveryObservation objects only")
         c, m = obs.context, obs.metadata
+        validate_context(c)
+        if not isinstance(obs.raw_record, dict):
+            raise ValueError("A1 raw_record must be an object")
+        canonical_record = json.dumps(
+            obs.raw_record, sort_keys=True, separators=(",", ":"),
+            ensure_ascii=False, default=str,
+        )
+        expected_content_hash = hashlib.sha256(canonical_record.encode()).hexdigest()
+        if obs.content_hash != expected_content_hash:
+            raise ValueError("A1 raw-record content hash does not match the supplied record")
+        key_material = {
+            "chain": c.chain, "mint": c.mint, "source_id": c.source_id,
+            "endpoint_id": c.endpoint_id, "run_id": c.run_id,
+            "source_record_index": c.source_record_index,
+            "content_hash": expected_content_hash,
+            "normalization_version": c.normalization_version,
+        }
+        canonical_key = hashlib.sha256(json.dumps(
+            key_material, sort_keys=True, separators=(",", ":")
+        ).encode()).hexdigest()
+        if obs.observation_key != canonical_key:
+            raise ValueError("A1 observation key does not match its canonical identity and content")
         raw = conn.execute(
             """SELECT rr.run_id, rr.source_id, rr.endpoint_id, cr.status
                FROM raw_responses rr JOIN collection_runs cr ON cr.run_id=rr.run_id
