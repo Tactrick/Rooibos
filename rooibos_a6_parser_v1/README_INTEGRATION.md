@@ -113,9 +113,18 @@ for all three data families:
 
 A1, A2 and A6 publication now share the same A13 transaction boundary:
 assessment, decision, raw-evidence links, lifecycle registration and final
-read-gate verification. A quarantined decision remains auditable but is not
-registered or exposed to consumers. Parser/normalizer errors and provenance
-mismatches fail the run closed.
+read-gate verification. The lifecycle registrar and read gate independently
+bind each evidence record's run/source/endpoint identity to the immutable raw
+response row, in addition to checking exact raw-response/source-index links.
+A quarantined decision remains auditable but is not registered or exposed to
+consumers. Parser/normalizer errors and provenance mismatches fail the run closed.
+
+Collector completion is no longer an ordinary framework transition.
+`transition(..., "completed")` is rejected; pipelines must supply the A13
+GateGrant and exact evidence records to `complete_after_a13_publication()`.
+That method re-runs the A13 read gate, verifies every record belongs to the
+same collection run and that its raw response has matching run/source/endpoint
+metadata, then marks the run complete inside the same database transaction.
 
 Provider decoders are explicit injected functions. They only transform an
 already-captured payload into the relevant provider-neutral input model; they
