@@ -88,14 +88,14 @@ class A13LifecycleTests(unittest.TestCase):
             "SELECT COUNT(*) FROM a13_snapshot_lifecycle_events WHERE snapshot_id='snap-1'").fetchone()[0], 0)
 
     def test_read_gate_rejects_registered_link_to_unapproved_raw_response(self):
-        register_snapshot(self.conn, snapshot_id='snap-1', event_id='evt-1',
+        self._register( snapshot_id='snap-1', event_id='evt-1',
             effective_at='2026-11-09T10:01:30Z', actor_id='g', reason='bad raw link',
             raw_response_ids=['raw-other'])
         with self.assertRaises(SnapshotAccessDenied):
             self._gate(require_lifecycle=True)
 
     def test_read_gate_rejects_extra_persisted_raw_response_link(self):
-        register_snapshot(self.conn, snapshot_id='snap-1', event_id='evt-1',
+        self._register( snapshot_id='snap-1', event_id='evt-1',
             effective_at='2026-11-09T10:01:30Z', actor_id='g', reason='publish',
             raw_response_ids=['raw'])
         self.conn.execute('DROP TRIGGER trg_a13_raw_links_no_update')
@@ -114,7 +114,7 @@ class A13LifecycleTests(unittest.TestCase):
         with self.assertRaises(sqlite3.IntegrityError): self.conn.execute("DELETE FROM a13_snapshot_lifecycle_events WHERE event_id='evt-2'")
 
     def test_supersession_preserves_old_and_registers_replacement(self):
-        register_snapshot(self.conn,snapshot_id='snap-1',event_id='evt-1',effective_at='2026-11-09T10:01:30Z',actor_id='g',reason='publish',raw_response_ids=['raw'])
+        self._register(snapshot_id='snap-1',event_id='evt-1',effective_at='2026-11-09T10:01:30Z',actor_id='g',reason='publish',raw_response_ids=['raw'])
         supersede_snapshot(self.conn,old_snapshot_id='snap-1',new_snapshot_id='snap-2',old_event_id='evt-2',new_event_id='evt-3',
           effective_at='2026-11-09T10:04:00Z',actor_id='g',reason='corrected evidence',new_raw_response_ids=['raw'])
         self.assertEqual(lifecycle_state(self.conn,'snap-1').state,'superseded')
@@ -123,7 +123,7 @@ class A13LifecycleTests(unittest.TestCase):
         with self.assertRaises(SnapshotAccessDenied): self._gate(snapshot='snap-1',require_lifecycle=True)
 
     def test_retention_expiry_denies_use_but_does_not_delete(self):
-        register_snapshot(self.conn,snapshot_id='snap-1',event_id='evt-1',effective_at='2026-11-09T10:01:30Z',actor_id='g',reason='publish',raw_response_ids=['raw'])
+        self._register(snapshot_id='snap-1',event_id='evt-1',effective_at='2026-11-09T10:01:30Z',actor_id='g',reason='publish',raw_response_ids=['raw'])
         add_retention_policy(self.conn,policy_id='research-default',version=1,dataset_type='a1_discovery',retention_days=1,
           effective_at='2026-11-09T00:00:00Z',approval_reference='POL-1',created_by='governance')
         assign_retention_policy(self.conn,snapshot_id='snap-1',policy_id='research-default',version=1,
@@ -134,7 +134,7 @@ class A13LifecycleTests(unittest.TestCase):
         self.assertEqual(self.conn.execute('SELECT COUNT(*) FROM a13_snapshot_decisions WHERE snapshot_id="snap-1"').fetchone()[0],1)
 
     def test_legal_hold_is_audited_and_does_not_reactivate_withdrawn_snapshot(self):
-        register_snapshot(self.conn,snapshot_id='snap-1',event_id='evt-1',effective_at='2026-11-09T10:01:30Z',actor_id='g',reason='publish',raw_response_ids=['raw'])
+        self._register(snapshot_id='snap-1',event_id='evt-1',effective_at='2026-11-09T10:01:30Z',actor_id='g',reason='publish',raw_response_ids=['raw'])
         set_legal_hold(self.conn,snapshot_id='snap-1',event_id='evt-2',effective_at='2026-11-09T10:02:00Z',actor_id='legal',reason='preserve for review',held=True)
         self.assertTrue(lifecycle_state(self.conn,'snap-1').legal_hold)
         self.assertEqual(lifecycle_state(self.conn,'snap-1').state,'registered')
@@ -144,18 +144,18 @@ class A13LifecycleTests(unittest.TestCase):
         with self.assertRaises(SnapshotAccessDenied): self._gate(require_lifecycle=True)
 
     def test_lifecycle_time_cannot_move_backwards(self):
-        register_snapshot(self.conn,snapshot_id='snap-1',event_id='evt-1',effective_at='2026-11-09T10:01:30Z',actor_id='g',reason='publish',raw_response_ids=['raw'])
+        self._register(snapshot_id='snap-1',event_id='evt-1',effective_at='2026-11-09T10:01:30Z',actor_id='g',reason='publish',raw_response_ids=['raw'])
         with self.assertRaises(LifecycleError): withdraw_snapshot(self.conn,snapshot_id='snap-1',event_id='evt-2',
           effective_at='2026-11-09T10:00:00Z',actor_id='g',reason='bad time')
 
 
     def test_retention_enforcement_denies_missing_policy(self):
-        register_snapshot(self.conn,snapshot_id='snap-1',event_id='evt-1',effective_at='2026-11-09T10:01:30Z',actor_id='g',reason='publish',raw_response_ids=['raw'])
+        self._register(snapshot_id='snap-1',event_id='evt-1',effective_at='2026-11-09T10:01:30Z',actor_id='g',reason='publish',raw_response_ids=['raw'])
         with self.assertRaises(SnapshotAccessDenied):
             self._gate(require_lifecycle=True,enforce_retention=True)
 
     def test_lifecycle_hash_chain_tampering_is_detected(self):
-        register_snapshot(self.conn,snapshot_id='snap-1',event_id='evt-1',effective_at='2026-11-09T10:01:30Z',actor_id='g',reason='publish',raw_response_ids=['raw'])
+        self._register(snapshot_id='snap-1',event_id='evt-1',effective_at='2026-11-09T10:01:30Z',actor_id='g',reason='publish',raw_response_ids=['raw'])
         self.conn.execute('DROP TRIGGER trg_a13_lifecycle_no_update')
         self.conn.execute("UPDATE a13_snapshot_lifecycle_events SET reason='tampered' WHERE event_id='evt-1'")
         with self.assertRaises(SnapshotAccessDenied): self._gate(require_lifecycle=True)
