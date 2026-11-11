@@ -198,12 +198,20 @@ def register_snapshot_for_records(conn: sqlite3.Connection, *, snapshot_id: str,
         if isinstance(index, bool) or not isinstance(index, int) or index < 0:
             raise LifecycleError("every approved record must reference a valid original source-record index")
         raw = conn.execute(
-            "SELECT run_id, source_id, endpoint_id FROM raw_responses WHERE raw_response_id=?",
+            """SELECT rr.run_id, rr.source_id, rr.endpoint_id,
+                      cr.source_id AS run_source_id, cr.endpoint_id AS run_endpoint_id
+               FROM raw_responses rr
+               JOIN collection_runs cr ON cr.run_id=rr.run_id
+               WHERE rr.raw_response_id=?""",
             (record.raw_response_id,),
         ).fetchone()
         if raw is None or (
-            raw["run_id"], raw["source_id"], raw["endpoint_id"]
-        ) != (record.run_id, record.source_id, record.endpoint_id):
+            raw["run_id"], raw["source_id"], raw["endpoint_id"],
+            raw["run_source_id"], raw["run_endpoint_id"],
+        ) != (
+            record.run_id, record.source_id, record.endpoint_id,
+            record.source_id, record.endpoint_id,
+        ):
             raise LifecycleError(
                 "record provenance does not match its persisted raw response run/source/endpoint"
             )
