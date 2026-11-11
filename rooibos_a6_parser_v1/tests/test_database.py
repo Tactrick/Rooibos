@@ -238,10 +238,10 @@ class Migration001Tests(unittest.TestCase):
                 4: MIGRATION_004_SQL, 5: MIGRATION_005_SQL, 6: MIGRATION_006_SQL, 7: MIGRATION_007_SQL}
         self.assertEqual({v: migration_checksum(sqls[v]) for v in expected}, expected)
 
-    def test_v1_8_example_database_upgrades_to_migrations_009_and_010(self):
+    def test_v1_7_example_database_upgrades_through_migrations_008_to_010(self):
         example_db = Path(__file__).resolve().parents[1] / "examples" / "moby_market_example.db"
         self.assertTrue(example_db.is_file(), "v1.8.0 example database fixture is missing")
-        upgrade_db = self.base / "v1_8_upgrade.db"
+        upgrade_db = self.base / "v1_7_upgrade.db"
         shutil.copy2(example_db, upgrade_db)
 
         conn = _connect(upgrade_db)
@@ -249,7 +249,7 @@ class Migration001Tests(unittest.TestCase):
             before_version = conn.execute(
                 "SELECT MAX(version) FROM schema_migrations"
             ).fetchone()[0]
-            self.assertEqual(before_version, 8)
+            self.assertEqual(before_version, 7)
             before_candles = conn.execute("SELECT COUNT(*) FROM ohlcv_candles").fetchone()[0]
             expected_backfill = conn.execute(
                 "SELECT COUNT(*) FROM ohlcv_candles WHERE source_record_index IS NOT NULL"
