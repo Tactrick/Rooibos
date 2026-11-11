@@ -64,13 +64,13 @@ class A13PipelineIntegrationTests(unittest.TestCase):
             1,
         )
 
-    def test_migration_chain_001_to_010_and_legacy_schema(self):
+    def test_migration_chain_001_to_011_and_legacy_schema(self):
         versions = [r[0] for r in self.conn.execute("SELECT version FROM schema_migrations ORDER BY version")]
-        self.assertEqual(versions, [1,2,3,4,5,6,7,8,9,10])
-        self.assertEqual(MIGRATION_VERSION, 10)
+        self.assertEqual(versions, [1,2,3,4,5,6,7,8,9,10,11])
+        self.assertEqual(MIGRATION_VERSION, 11)
         tables = {r[0] for r in self.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         self.assertTrue({"ohlcv_candles", "a6_candle_evidence_links", "market_observations", "token_discovery_observations",
-                         "a13_record_assessments", "a13_snapshot_decisions", "a13_snapshot_lifecycle_events", "a13_snapshot_evidence_links", "a13_retention_policies"}.issubset(tables))
+                         "a13_record_assessments", "a13_snapshot_decisions", "a13_snapshot_lifecycle_events", "a13_snapshot_evidence_links", "a13_retention_policies", "collection_record_manifests"}.issubset(tables))
         self.assertIn("snapshot_content_hash", {r[1] for r in self.conn.execute("PRAGMA table_info(a13_snapshot_decisions)")})
 
     def test_a1_projection_and_snapshot_gate(self):
