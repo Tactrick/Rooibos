@@ -243,6 +243,32 @@ class A13PipelineIntegrationTests(unittest.TestCase):
             allow_warnings=True)
         self.assertEqual(allowed.dataset_status, "approved_with_warnings")
 
+    def test_a13_unexpected_expected_membership_is_quarantined(self):
+        ctx = DiscoveryContext("solana", MINT, "fixture_source", "fixture_endpoint",
+            "run-extra", "raw-extra", 0, "2026-11-09T10:00:00Z")
+        record = project_a1(normalize_a1(ctx, {"symbol":"SOL"},
+            field_map={"symbol":"symbol"}))
+        _, decision = assess_and_store_snapshot(self.conn, [record],
+            snapshot_id="snap-extra-membership", source_policies=POLICIES,
+            assessed_at="2026-11-09T10:01:00Z", decided_at="2026-11-09T10:02:00Z",
+            expected_record_ids={"different-expected-record"})
+        self.assertEqual(decision.dataset_status, "quarantined")
+        self.assertIn("snapshot_unexpected_membership",
+                      {finding.code for finding in decision.findings})
+
+    def test_a13_explicitly_empty_expected_membership_is_quarantined(self):
+        ctx = DiscoveryContext("solana", MINT, "fixture_source", "fixture_endpoint",
+            "run-empty-expected", "raw-empty-expected", 0, "2026-11-09T10:00:00Z")
+        record = project_a1(normalize_a1(ctx, {"symbol":"SOL"},
+            field_map={"symbol":"symbol"}))
+        _, decision = assess_and_store_snapshot(self.conn, [record],
+            snapshot_id="snap-empty-expected", source_policies=POLICIES,
+            assessed_at="2026-11-09T10:01:00Z", decided_at="2026-11-09T10:02:00Z",
+            expected_record_ids=set())
+        self.assertEqual(decision.dataset_status, "quarantined")
+        self.assertIn("snapshot_empty_expected_membership",
+                      {finding.code for finding in decision.findings})
+
     def test_a13_incomplete_expected_membership_is_quarantined(self):
         ctx = DiscoveryContext("solana", MINT, "fixture_source", "fixture_endpoint",
             "run-incomplete", "raw-incomplete", 0, "2026-11-09T10:00:00Z")
