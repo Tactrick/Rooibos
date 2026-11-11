@@ -7,9 +7,9 @@
 ## Agreed target architecture
 
 - **Proxmox VE:** bare-metal hypervisor and host management layer.
-- **Home Assistant OS VM:** Home Assistant, its Supervisor/App ecosystem, Music Assistant installed as a Home Assistant app, and the previously planned AirPlay/Shairport Sync path from the iPhone.
+- **Home Assistant OS VM:** Home Assistant and its Supervisor/App ecosystem. Keep the planned iPhone-to-server AirPlay receiver path (Shairport Sync); decide its exact placement and audio-output integration after inspecting the host and testing audio compatibility. **Music Assistant is deferred for now** and is not part of the initial deployment.
 - **Debian VM:** Rooibos/Moby services, collector pipeline, research tools, and future development/remote-work environment. Keep this separate from Home Assistant.
-- **Remote access:** private VPN access (WireGuard or Tailscale to be selected after network review) for authorised remote access to Rooibos, Home Assistant, and music services. Do not expose SSH, Proxmox, databases, internal APIs, or administration interfaces directly to the public internet.
+- **Remote access:** private VPN access (WireGuard or Tailscale to be selected after network review) for authorised remote access to Rooibos and Home Assistant. Do not expose SSH, Proxmox, databases, internal APIs, or administration interfaces directly to the public internet.
 - **Audio:** use the T630's audio output to the amplifier with the planned 3.5 mm-to-RCA connection if supported; use a USB audio adapter only if passthrough proves problematic.
 
 ### Working resource assumptions
@@ -81,7 +81,7 @@ Use systemd supervision only after the Debian baseline is accepted. Rooibos serv
 
 ### G3 — Database and storage
 
-Preserve `moby_market.db`. Inspect the actual v1.8.0 source, migrations and tests before deploying. Keep the database, WAL and SHM files under a protected directory with least-privilege access. Validate free space, storage health and backup destination. Never place secrets in the database or logs. Keep music-library storage and backups separate from the Rooibos database and its recovery path.
+Preserve `moby_market.db`. Inspect the actual v1.8.0 source, migrations and tests before deploying. Keep the database, WAL and SHM files under a protected directory with least-privilege access. Validate free space, storage health and backup destination. Never place secrets in the database or logs. Keep any future media storage and backups separate from the Rooibos database and its recovery path.
 
 ### G4 — Configuration and network policy
 
@@ -96,11 +96,11 @@ Preserve `moby_market.db`. Inspect the actual v1.8.0 source, migrations and test
 
 ### G5 — Recovery
 
-Create consistent backups for Proxmox guest configuration, HAOS, the Debian VM, Rooibos SQLite data, and the music library as appropriate. Perform restores into separate test locations. Verify database integrity, foreign keys, migration state, and access permissions. Record recovery steps and prove they work before enabling scheduled collectors or relying on the server for home automation.
+Create consistent backups for Proxmox guest configuration, HAOS, the Debian VM, and Rooibos SQLite data. Perform restores into separate test locations. Verify database integrity, foreign keys, migration state, and access permissions. Record recovery steps and prove they work before enabling scheduled collectors or relying on the server for home automation.
 
 ### G6 — Service deployment
 
-Bring up Proxmox and validate networking/storage first. Then deploy HAOS and validate Home Assistant, Music Assistant and the planned audio path. Deploy the Debian VM separately. Within Debian, deploy incrementally in the agreed Rooibos order: common pipeline, A6 vertical slice, A2 integration, A1 integration, then A13 validation/acceptance. Use synthetic fixtures first. No live endpoint is exercised without explicit approval and a verified source mapping. Keep the agent runtime separate and out of scope until the collector host is stable.
+Bring up Proxmox and validate networking/storage first. Then deploy HAOS and validate Home Assistant. Retain the AirPlay receiver path and test it separately with the selected audio output. Music Assistant is explicitly out of the initial scope; reconsider it only later if requested. Deploy the Debian VM separately. Within Debian, deploy incrementally in the agreed Rooibos order: common pipeline, A6 vertical slice, A2 integration, A1 integration, then A13 validation/acceptance. Use synthetic fixtures first. No live endpoint is exercised without explicit approval and a verified source mapping. Keep the agent runtime separate and out of scope until the collector host is stable.
 
 ## First-session acceptance
 
