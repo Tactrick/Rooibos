@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 
 from rooibos_db.database import initialize_database, _connect
-from rooibos_collectors import CollectorFramework, EndpointPolicy
+from rooibos_collectors import CollectorFramework, EndpointPolicy, CollectorPolicyError
 from rooibos_collectors.a1_pipeline import process_a1_raw_response
 from rooibos_collectors.a2_pipeline import process_a2_raw_response
 from rooibos_collectors.a6_pipeline import process_a6_raw_response
@@ -74,8 +74,8 @@ class SharedCollectorDatabaseRehearsalTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def _capture(self, module, payload, raw_id, params):
-        run_id = "shared-" + module.lower()
+    def _capture(self, module, payload, raw_id, params, *, run_id=None):
+        run_id = run_id or ("shared-" + module.lower())
         self.framework.create_run(
             run_id=run_id, collector_id=module, source_id="fixture_source",
             endpoint_id="fixture_endpoint", collector_version="1.0.0",
@@ -390,6 +390,129 @@ class SharedCollectorDatabaseRehearsalTests(unittest.TestCase):
                 "SELECT COUNT(*) FROM a13_snapshot_evidence_links WHERE raw_response_id=?",
                 (a1_raw,),
             ).fetchone()[0], 0)
+        finally:
+            conn.close()
+
+
+    def test_fresh_database_deployment_rehearsal_quarantine_and_recovery(self):
+        # setUp creates the fresh deployment database and framework. Verify
+        # registrations before attempting any collection work.
+        conn = _connect(self.db)
+        try:
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM collectors WHERE is_enabled=1").fetchone()[0],
+                3,
+            )
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM sources WHERE source_id='fixture_source' AND is_enabled=1").fetchone()[0],
+                1,
+            )
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM source_endpoints WHERE endpoint_id='fixture_endpoint' AND is_enabled=1").fetchone()[0],
+                1,
+            )
+        finally:
+            conn.close()
+
+        # Default-deny and unvalidated endpoint policies fail before a run is
+        # created. No endpoint execution/network capability exists here.
+        deny_all = CollectorFramework(self.db, [])
+        with self.assertRaisesRegex(CollectorPolicyError, "default deny"):
+            deny_all.create_run(
+                run_id="deployment-unlisted-endpoint", collector_id="A1",
+                source_id="fixture_source", endpoint_id="fixture_endpoint",
+                collector_version="1.0.0", requested_scope={"module": "A1"},
+            )
+        unvalidated = CollectorFramework(self.db, [EndpointPolicy(
+            source_id="fixture_source", endpoint_id="fixture_endpoint",
+            endpoint_name="fixture_read", method="GET", path="/fixture/read",
+            allowed_parameter_keys=frozenset({"scope"}), validated=False,
+        )])
+        with self.assertRaisesRegex(CollectorPolicyError, "has not passed validation"):
+            unvalidated.create_run(
+                run_id="deployment-unvalidated-endpoint", collector_id="A1",
+                source_id="fixture_source", endpoint_id="fixture_endpoint",
+                collector_version="1.0.0", requested_scope={"module": "A1"},
+            )
+
+        def decode_a1(payload, provenance):
+            return [normalize_a1(
+                DiscoveryContext(
+                    "solana", MINT, provenance.source_id, provenance.endpoint_id,
+                    provenance.run_id, provenance.raw_response_id, index,
+                    provenance.retrieved_at, source_record_count=len(payload["records"]),
+                ),
+                row, field_map={"symbol": "symbol"},
+            ) for index, row in enumerate(payload["records"])]
+
+        # First attempt: endpoint transport policy allows capture, but A13's
+        # narrower dataset policy excludes A1. Raw response is retained and
+        # the run is quarantined without consumer links.
+        rejected_run = self._capture(
+            "A1", {"records": [{"symbol": "RECOVERY"}]},
+            "deployment-a1-rejected-raw", {"scope": "discovery"},
+            run_id="deployment-a1-rejected",
+        )
+        rejected = process_a1_raw_response(
+            self.framework, run_id=rejected_run,
+            raw_response_id="deployment-a1-rejected-raw",
+            decode_payload=decode_a1, snapshot_id="deployment-a1-rejected-snapshot",
+            source_policies={
+                "fixture_source": SourcePolicy(
+                    "fixture_source", ("fixture_endpoint",), True,
+                    allowed_dataset_types=("a2_market",),
+                )
+            },
+            **TIMES,
+        )
+        self.assertFalse(rejected.published)
+        self.assertEqual(rejected.decision.dataset_status, "quarantined")
+
+        # Recovery is a new auditable run, not a mutation/replay of the
+        # terminal quarantined run. Once policy is corrected, A1 publishes.
+        recovery_run = self._capture(
+            "A1", {"records": [{"symbol": "RECOVERED"}]},
+            "deployment-a1-recovery-raw", {"scope": "discovery"},
+            run_id="deployment-a1-recovery",
+        )
+        recovered = process_a1_raw_response(
+            self.framework, run_id=recovery_run,
+            raw_response_id="deployment-a1-recovery-raw",
+            decode_payload=decode_a1, snapshot_id="deployment-a1-recovery-snapshot",
+            source_policies=SOURCE_POLICIES, **TIMES,
+        )
+        self.assertTrue(recovered.published)
+        self.assertEqual(recovered.decision.dataset_status, "approved_for_research")
+
+        conn = _connect(self.db)
+        try:
+            statuses = dict(conn.execute(
+                "SELECT run_id,status FROM collection_runs WHERE run_id IN (?,?)",
+                (rejected_run, recovery_run),
+            ).fetchall())
+            self.assertEqual(statuses, {
+                rejected_run: "quarantined",
+                recovery_run: "completed",
+            })
+            self.assertEqual(conn.execute(
+                "SELECT COUNT(*) FROM raw_responses WHERE raw_response_id IN (?,?)",
+                ("deployment-a1-rejected-raw", "deployment-a1-recovery-raw"),
+            ).fetchone()[0], 2)
+            self.assertEqual(conn.execute(
+                "SELECT COUNT(*) FROM a13_snapshot_raw_links WHERE snapshot_id='deployment-a1-rejected-snapshot'",
+            ).fetchone()[0], 0)
+            self.assertEqual(conn.execute(
+                "SELECT COUNT(*) FROM a13_snapshot_evidence_links WHERE snapshot_id='deployment-a1-rejected-snapshot'",
+            ).fetchone()[0], 0)
+            self.assertEqual(conn.execute(
+                "SELECT COUNT(*) FROM a13_snapshot_lifecycle_events WHERE snapshot_id='deployment-a1-rejected-snapshot'",
+            ).fetchone()[0], 0)
+            self.assertEqual(conn.execute(
+                "SELECT raw_response_id FROM a13_snapshot_raw_links WHERE snapshot_id='deployment-a1-recovery-snapshot'",
+            ).fetchone()[0], "deployment-a1-recovery-raw")
+            self.assertEqual(conn.execute(
+                "SELECT COUNT(*) FROM a13_snapshot_evidence_links WHERE snapshot_id='deployment-a1-recovery-snapshot'",
+            ).fetchone()[0], 1)
         finally:
             conn.close()
 
