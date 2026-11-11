@@ -177,5 +177,23 @@ class A13PipelineIntegrationTests(unittest.TestCase):
                 expected_assessments_hash=decision.assessments_hash,
                 allowed_policy_versions={decision.policy_version}, now="2026-11-09T10:03:00Z")
 
+
+    def test_read_gate_hash_binds_raw_response_to_source_record_index(self):
+        ctx = DiscoveryContext("solana", MINT, "fixture_source", "fixture_endpoint",
+                               "run-coordinate", "raw-coordinate", 4, "2026-11-09T10:00:00Z")
+        record = project_a1(normalize_a1(ctx, {"symbol":"SOL"}, field_map={"symbol":"symbol"}))
+        _, decision = assess_and_store_snapshot(self.conn, [record], snapshot_id="snap-coordinate",
+            source_policies=POLICIES, assessed_at="2026-11-09T10:01:00Z",
+            decided_at="2026-11-09T10:02:00Z")
+        from dataclasses import replace
+        altered = replace(record, source_record_index=5)
+        # Even when the caller recomputes the supplied hash, the persisted
+        # approval remains bound to the original raw-response/source-index pair.
+        with self.assertRaises(SnapshotAccessDenied):
+            authorize_snapshot(self.conn, snapshot_id="snap-coordinate", records=[altered],
+                expected_snapshot_hash=snapshot_content_hash([altered]),
+                expected_assessments_hash=decision.assessments_hash,
+                allowed_policy_versions={decision.policy_version}, now="2026-11-09T10:03:00Z")
+
 if __name__ == "__main__":
     unittest.main()
