@@ -88,6 +88,36 @@ class A13LifecycleTests(unittest.TestCase):
         self.assertEqual(self.conn.execute(
             "SELECT COUNT(*) FROM a13_snapshot_lifecycle_events WHERE snapshot_id='snap-1'").fetchone()[0], 0)
 
+    def test_lifecycle_registration_rejects_raw_response_from_a_different_run(self):
+        from dataclasses import replace
+        foreign_record = replace(self.record, raw_response_id='raw-foreign')
+        self.conn.execute(
+            "INSERT INTO collection_runs(run_id,collector_id,source_id,collector_version,requested_scope_json,started_at,status) "
+            "VALUES ('foreign-run','collector','fixture','1','{}','2026-11-09T09:30:00Z','completed')"
+        )
+        self.conn.execute(
+            "INSERT INTO raw_responses(raw_response_id,run_id,source_id,endpoint_id,retrieved_at,request_params_json,payload_json,payload_sha256) "
+            "VALUES ('raw-foreign','foreign-run','fixture','ep','2026-11-09T10:00:00Z','{}','{}','foreign-hash')"
+        )
+        foreign_hash = snapshot_content_hash([foreign_record])
+        self.conn.execute(
+            "INSERT INTO a13_snapshot_decisions "
+            "(snapshot_id,dataset_type,record_ids_json,dataset_status,assessments_hash,findings_json,decided_at,policy_version,snapshot_content_hash) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            ('snap-foreign-registration','a1_discovery',json.dumps(['rec-1']),'approved_for_research',
+             'assesshash','[]','2026-11-09T10:01:00Z','a13-governance/0.1.0',foreign_hash)
+        )
+        with self.assertRaisesRegex(LifecycleError, 'record provenance does not match'):
+            register_snapshot_for_records(self.conn, snapshot_id='snap-foreign-registration',
+                event_id='evt-foreign-registration', effective_at='2026-11-09T10:01:30Z',
+                actor_id='g', reason='reject cross-run evidence', records=[foreign_record])
+        self.assertEqual(self.conn.execute(
+            "SELECT COUNT(*) FROM a13_snapshot_lifecycle_events WHERE snapshot_id='snap-foreign-registration'"
+        ).fetchone()[0], 0)
+        self.assertEqual(self.conn.execute(
+            "SELECT COUNT(*) FROM a13_snapshot_evidence_links WHERE snapshot_id='snap-foreign-registration'"
+        ).fetchone()[0], 0)
+
     def test_read_gate_rejects_raw_response_from_a_different_run(self):
         from dataclasses import replace
         foreign_record = replace(self.record, raw_response_id='raw-foreign')
