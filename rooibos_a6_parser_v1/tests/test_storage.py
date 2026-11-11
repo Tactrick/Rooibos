@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 import sqlite3
 import sys
 import tempfile
@@ -11,7 +12,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(DB_ROOT))
 
 from rooibos_db.database import initialize_database, check_integrity
-from rooibos_a6.parser import ParseContext, normalise_records
+from rooibos_a6.parser import ParseContext, ParseResult, normalise_records
 from rooibos_a6.storage import store_raw_response, persist_parse_result
 from rooibos_integrations.a13_projection import project_a6_from_storage, publish_a6_snapshot_from_storage
 from rooibos_a13.models import SourcePolicy
@@ -380,7 +381,17 @@ class A6StorageTests(unittest.TestCase):
             dict(self.records[0], source_record_index=0),
             dict(self.records[1], source_record_index=0),
         ]
-        result = self.parse(records)
+        # The parser itself rejects duplicate indexes. Construct a deliberately
+        # malformed ParseResult to exercise the independent storage boundary.
+        parsed = self.parse()
+        result = ParseResult(
+            candles=[parsed.candles[0], replace(parsed.candles[1], source_record_index=0)],
+            findings=parsed.findings, received_count=parsed.received_count,
+            decoded_count=parsed.decoded_count, rejected_count=parsed.rejected_count,
+            duplicate_count=parsed.duplicate_count, conflict_count=parsed.conflict_count,
+            input_sha256=parsed.input_sha256, output_sha256=parsed.output_sha256,
+            status=parsed.status,
+        )
         with self.assertRaisesRegex(ValueError, "must be unique"):
             persist_parse_result(self.db, result=result, raw_response_id=self.raw_id)
         c = sqlite3.connect(self.db)
