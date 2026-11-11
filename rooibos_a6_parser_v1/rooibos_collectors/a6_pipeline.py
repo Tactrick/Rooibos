@@ -179,7 +179,9 @@ def process_a6_raw_response(
                 ).fetchall()
                 membership = {i: [] for i in range(records[0]["source_record_count"])}
                 for link in links:
-                    membership.setdefault(link["source_record_index"], []).append(link["candle_id"])
+                    membership.setdefault(link["source_record_index"], []).append(
+                        f"{link['source_record_index']}:{link['candle_id']}"
+                    )
                 store_record_manifest(
                     manifest_conn, run_id=run_id, raw_response_id=raw_response_id,
                     collector_module="A6", source_record_count=records[0]["source_record_count"],
