@@ -184,7 +184,7 @@ def process_a2_raw_response(
             # authorization check/completion. Cancellation cannot split them.
             conn.execute("BEGIN IMMEDIATE")
             run_state = conn.execute(
-                "SELECT status FROM collection_runs WHERE run_id=?", (run_id,)
+                "SELECT status, publication_failed_at FROM collection_runs WHERE run_id=?", (run_id,)
             ).fetchone()
             if run_state is None or run_state["status"] != "validating":
                 raise ValueError("A13 publication requires a run still in validating state")
@@ -209,8 +209,12 @@ def process_a2_raw_response(
                     run_id, grant=grant, records=records, connection=conn,
                 )
             conn.commit()
-        except Exception:
+        except Exception as publication_exc:
             conn.rollback()
+            try:
+                framework.mark_publication_failure(run_id, str(publication_exc))
+            except Exception:
+                pass
             raise
         finally:
             conn.close()
@@ -227,7 +231,7 @@ def process_a2_raw_response(
             if row and row["status"] == "normalised":
                 framework.transition(run_id, "validating")
                 framework.transition(run_id, "failed", error_summary=str(exc)[:1000])
-            elif row and row["status"] in {"raw_captured", "parsed", "validating", "partial"}:
+            elif row and row["status"] in {"raw_captured", "parsed", "validating", "partial"} and not row["publication_failed_at"]:
                 framework.transition(run_id, "failed", error_summary=str(exc)[:1000])
         except Exception:
             pass
