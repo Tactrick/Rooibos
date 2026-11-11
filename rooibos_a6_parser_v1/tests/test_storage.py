@@ -70,6 +70,37 @@ class A6StorageTests(unittest.TestCase):
         self.assertEqual(c.execute("SELECT status FROM collection_runs WHERE run_id='run1'").fetchone()[0], 'normalised')
         c.close()
 
+    def test_original_source_indices_survive_storage_and_a13_projection(self):
+        # Deliberately supply newest-first records while their source indices
+        # identify their positions in the immutable provider response.
+        records = [
+            dict(self.records[1], source_record_index=1),
+            dict(self.records[0], source_record_index=0),
+        ]
+        result = self.parse(records)
+        persist_parse_result(self.db, result=result, raw_response_id=self.raw_id)
+
+        c = sqlite3.connect(self.db)
+        c.row_factory = sqlite3.Row
+        rows = c.execute(
+            "SELECT candle_id,open_time_ms,source_record_index FROM ohlcv_candles ORDER BY open_time_ms"
+        ).fetchall()
+        self.assertEqual(
+            [(row["open_time_ms"], row["source_record_index"]) for row in rows],
+            [(1794225600000, 0), (1794226500000, 1)],
+        )
+        projected = [
+            record
+            for row in rows
+            for record in project_a6_from_storage(c, row["candle_id"])
+        ]
+        self.assertEqual(
+            {(record.payload["open_time_ms"], record.source_record_index) for record in projected},
+            {(1794225600000, 0), (1794226500000, 1)},
+        )
+        self.assertTrue(all(record.raw_response_id == self.raw_id for record in projected))
+        c.close()
+
     def test_replay_is_idempotent(self):
         result = self.parse()
         first = persist_parse_result(self.db, result=result, raw_response_id=self.raw_id)
