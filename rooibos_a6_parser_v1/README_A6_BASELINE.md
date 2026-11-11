@@ -140,3 +140,27 @@ the approved evidence records and denies access on any missing, extra, or
 altered relationship. The source index is also bound into the approved
 snapshot content hash. Migration 010 is additive; earlier migrations remain
 immutable. Tests use synthetic local records only.
+
+### A1/A2 original source-record coverage
+
+The A1 and A2 raw-response pipelines now require their explicit provider
+adapters to declare the original response-array length as
+`source_record_count` on every decoded source record. Before persistence,
+each pipeline verifies that all declared counts agree and that the decoded
+records cover every original zero-based index exactly once. A2 validates
+source-record coverage before expanding each source record into multiple
+metric observations. Missing records, duplicate indices, inconsistent
+counts, or omitted counts fail closed. Direct normalizer use may omit the
+count for isolated local workflows; collector publication may not.
+
+### A13 replacement lifecycle
+
+The publication-safe replacement API is
+`supersede_snapshot_for_records()`. It validates replacement decision
+membership and content hash, then atomically supersedes the old snapshot and
+registers the replacement with exact per-record raw-response/source-index
+links. The legacy `supersede_snapshot()` API, which accepts only a list of raw
+response IDs, now fails closed because it cannot prove record-level
+provenance. Read authorization continues to require the exact per-record
+links, regardless of whether lifecycle checks are otherwise requested.
+
