@@ -201,7 +201,10 @@ class A1A2CollectorToA13E2ETests(unittest.TestCase):
         try:
             self.assertEqual(conn.execute(
                 "SELECT status FROM collection_runs WHERE run_id=?", (run_id,)
-            ).fetchone()[0], "failed")
+            ).fetchone()[0], "validating")
+            self.assertIsNotNone(conn.execute(
+                "SELECT publication_failed_at FROM collection_runs WHERE run_id=?", (run_id,)
+            ).fetchone()[0])
             self.assertEqual(conn.execute(
                 "SELECT COUNT(*) FROM a13_record_assessments"
             ).fetchone()[0], assessments_before)
@@ -299,7 +302,10 @@ class A1A2CollectorToA13E2ETests(unittest.TestCase):
         try:
             self.assertEqual(conn.execute(
                 "SELECT status FROM collection_runs WHERE run_id=?", (run_id,)
-            ).fetchone()[0], "failed")
+            ).fetchone()[0], "validating")
+            self.assertIsNotNone(conn.execute(
+                "SELECT publication_failed_at FROM collection_runs WHERE run_id=?", (run_id,)
+            ).fetchone()[0])
             self.assertEqual(conn.execute(
                 "SELECT COUNT(*) FROM a13_record_assessments"
             ).fetchone()[0], assessments_before)
