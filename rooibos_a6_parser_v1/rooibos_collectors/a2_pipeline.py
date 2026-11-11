@@ -52,6 +52,8 @@ def validate_a2_source_record_coverage(inputs: Iterable[MarketObservationInput])
     if len(set(counts)) != 1:
         raise ValueError("A2 decoded records disagree on original source_record_count")
     indices = [row.source_record_index for row in rows]
+    if any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in indices):
+        raise ValueError("A2 decoder must supply non-negative integer original source_record_index values")
     if len(set(indices)) != len(indices):
         raise ValueError("A2 decoder returned duplicate source records")
     if len(rows) != counts[0] or set(indices) != set(range(counts[0])):
