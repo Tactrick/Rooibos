@@ -68,7 +68,6 @@ section "Firmware and platform security indicators"
 if [ -d /sys/firmware/efi ]; then printf 'Boot mode: UEFI\n'; else printf 'Boot mode: Legacy BIOS or EFI information unavailable\n'; fi
 run mokutil --sb-state
 run tpm2_getcap properties-fixed
-run fwupdmgr get-devices
 
 section "Network overview (addresses and MACs intentionally omitted)"
 run ip -brief link
@@ -88,7 +87,7 @@ run dnf --version
 run rpm --version
 run python3 --version
 run sqlite3 --version
-run openssh -V
+run ssh -V
 run ufw status
 run nft list ruleset
 
