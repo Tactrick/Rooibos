@@ -124,5 +124,10 @@ raw capture remain the responsibility of `CollectorFramework`.
 
 This is an implementation seam, not yet an approved production collector.
 No Moby endpoint mapping, live network adapter, credential handling, or
-production source policy is enabled. The new orchestration entry points still
-need dedicated end-to-end regression tests before acceptance.
+production source policy is enabled. Synthetic end-to-end regression tests now
+cover A1 and A2 capture, decoding, complete source-record coverage, provenance
+binding, persistence, A13 assessment/publication and successful run completion.
+A1 and A2 incomplete-source coverage is tested to fail before persistence or
+publication. A6 has corresponding full-path publication and quarantine tests.
+These are synthetic acceptance results only; genuine provider fixtures, source
+mapping approval and deployment acceptance remain outstanding.
