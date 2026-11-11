@@ -35,7 +35,7 @@ class A13LifecycleTests(unittest.TestCase):
             return register_snapshot_for_records(self.conn, snapshot_id=snapshot_id,
                 event_id=event_id, effective_at=effective_at, actor_id=actor_id,
                 reason=reason, records=[self.record])
-        self._register( snapshot_id=snapshot_id, event_id=event_id,
+        register_snapshot(self.conn, snapshot_id=snapshot_id, event_id=event_id,
             effective_at=effective_at, actor_id=actor_id, reason=reason,
             raw_response_ids=raw_response_ids)
         self.conn.execute(
@@ -49,7 +49,7 @@ class A13LifecycleTests(unittest.TestCase):
           expected_assessments_hash='assesshash',allowed_policy_versions={'a13-governance/0.1.0'},now=now,**kwargs)
 
     def test_registered_snapshot_passes_required_lifecycle_gate(self):
-        register_snapshot(self.conn,snapshot_id='snap-1',event_id='evt-1',effective_at='2026-11-09T10:01:30Z',
+        self._register(snapshot_id='snap-1',event_id='evt-1',effective_at='2026-11-09T10:01:30Z',
           actor_id='governance',reason='approved and published',raw_response_ids=['raw'])
         self.assertEqual(self._gate(require_lifecycle=True).snapshot_id,'snap-1')
         self.assertEqual(lifecycle_state(self.conn,'snap-1').state,'registered')
