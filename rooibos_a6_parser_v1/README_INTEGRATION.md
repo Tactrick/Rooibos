@@ -8,7 +8,7 @@
 - A1 Token Discovery models, policy and append-only storage.
 - A13 validation, governance, append-only assessment/decision storage and fail-closed snapshot read gate.
 - Provider-neutral projection adapters: `rooibos_integrations/a13_projection.py`.
-- Shared migration runner now applies migrations 001–007. Existing migration SQL 001–004 is unchanged; `moby_market.db` remains the database filename.
+- Shared migration runner now applies migrations 001–010. Existing migration SQL 001–004 is unchanged; migrations are checksum-verified and `moby_market.db` remains the database filename.
 
 ## Projection contracts
 
@@ -26,6 +26,10 @@
 - 001–004: original v1.3.0 migration SQL retained unchanged.
 - 005: append-only A1 discovery observations.
 - 006: append-only A13 assessments and snapshot decisions.
+- 007: bind A13 decisions to exact snapshot content hashes.
+- 008: append-only A13 lifecycle, retention governance and raw-response links.
+- 009: preserve every A6 candle-to-raw-response/source-record relationship, including backfill of existing candles.
+- 010: bind every A13 evidence record to exact raw-response/source-record coordinates.
 - Runner checksum-checks all applied migrations and refuses checksum drift.
 
 ## Verification
