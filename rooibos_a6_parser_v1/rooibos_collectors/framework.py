@@ -129,13 +129,16 @@ class CollectorFramework:
         finally:
             conn.close()
 
-    def complete_after_a13_publication(self, run_id: str, *, grant, records) -> None:
+    def complete_after_a13_publication(
+        self, run_id: str, *, grant, records,
+        connection: sqlite3.Connection | None = None,
+    ) -> None:
         """Complete a run only after independently re-authorizing its A13 grant.
 
-        The grant is treated as a claim, not a bearer capability: the persisted
-        decision, exact snapshot membership, content hash, lifecycle, raw links
-        and record-to-raw-source coordinates are checked again inside the same
-        write transaction that marks the run complete.
+        When called with an existing transaction, publication and run completion
+        share one SQLite write transaction. This prevents a cancellation or
+        competing terminal transition from landing between publication commit
+        and completion.
         """
         from rooibos_a13.read_gate import GateGrant, authorize_snapshot
 
@@ -145,9 +148,14 @@ class CollectorFramework:
         if any(getattr(record, "run_id", None) != run_id for record in rows):
             raise InvalidRunTransition("A13 snapshot contains evidence from a different collection run")
 
-        conn = _connect(self.db_path)
+        owns_connection = connection is None
+        conn = connection if connection is not None else _connect(self.db_path)
         try:
-            conn.execute("BEGIN IMMEDIATE")
+            if owns_connection:
+                conn.execute("BEGIN IMMEDIATE")
+            elif not conn.in_transaction:
+                raise InvalidRunTransition("shared A13 completion requires an active transaction")
+
             run = conn.execute(
                 "SELECT status, source_id, endpoint_id FROM collection_runs WHERE run_id=?", (run_id,)
             ).fetchone()
@@ -195,12 +203,15 @@ class CollectorFramework:
                 "UPDATE collection_runs SET status='completed', completed_at=?, error_summary=NULL WHERE run_id=?",
                 (completed_at, run_id),
             )
-            conn.commit()
+            if owns_connection:
+                conn.commit()
         except Exception:
-            conn.rollback()
+            if owns_connection:
+                conn.rollback()
             raise
         finally:
-            conn.close()
+            if owns_connection:
+                conn.close()
 
     def authorise_request(self, run_id: str, params: Mapping[str, Any]) -> RequestTicket:
         """Create an auditable request ticket; this does not execute a network call."""
