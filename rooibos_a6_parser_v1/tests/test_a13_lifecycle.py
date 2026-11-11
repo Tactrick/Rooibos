@@ -12,7 +12,7 @@ class A13LifecycleTests(unittest.TestCase):
         self.tmp=tempfile.TemporaryDirectory(); self.path=Path(self.tmp.name)/'moby_market.db'
         initialize_database(self.path); self.conn=_connect(self.path)
         self.record=EvidenceRecord('rec-1','a1_discovery','solana','MintCaseSensitive','fixture','ep','run','raw',
-            '2026-11-09T10:00:00Z','norm-v1','payloadhash',{'symbol':'X'})
+            '2026-11-09T10:00:00Z','norm-v1','payloadhash',{'symbol':'X'},0)
         self.hash=snapshot_content_hash([self.record])
         self._decision('snap-1','approved_for_research')
         self._decision('snap-2','approved_for_research')
@@ -29,6 +29,20 @@ class A13LifecycleTests(unittest.TestCase):
           (snapshot_id,dataset_type,record_ids_json,dataset_status,assessments_hash,findings_json,decided_at,policy_version,snapshot_content_hash)
           VALUES (?,?,?,?,?,?,?,?,?)''',(snapshot_id,'a1_discovery',json.dumps(['rec-1']),status,'assesshash','[]',
           '2026-11-09T10:01:00Z','a13-governance/0.1.0',self.hash))
+
+    def _register(self, *, snapshot_id, event_id, effective_at, actor_id, reason, raw_response_ids):
+        if list(raw_response_ids) == ['raw']:
+            return register_snapshot_for_records(self.conn, snapshot_id=snapshot_id,
+                event_id=event_id, effective_at=effective_at, actor_id=actor_id,
+                reason=reason, records=[self.record])
+        self._register( snapshot_id=snapshot_id, event_id=event_id,
+            effective_at=effective_at, actor_id=actor_id, reason=reason,
+            raw_response_ids=raw_response_ids)
+        self.conn.execute(
+            "INSERT INTO a13_snapshot_evidence_links "
+            "(snapshot_id,record_id,raw_response_id,source_record_index,linked_at) VALUES (?,?,?,?,?)",
+            (snapshot_id, self.record.record_id, self.record.raw_response_id,
+             self.record.source_record_index, effective_at))
 
     def _gate(self,snapshot='snap-1',now='2026-11-09T10:02:00Z',**kwargs):
         return authorize_snapshot(self.conn,snapshot_id=snapshot,records=[self.record],expected_snapshot_hash=self.hash,
