@@ -46,7 +46,7 @@ class A13PipelineIntegrationTests(unittest.TestCase):
         self.conn.execute("INSERT INTO sources(source_id,source_name,source_type) VALUES ('fixture_source','Fixture','api')")
         self.conn.execute("INSERT INTO collectors(collector_id,collector_name,module_code,version) VALUES ('fixture-collector','Fixture','A1','1')")
         self.conn.execute("INSERT INTO collection_runs(run_id,collector_id,source_id,collector_version,requested_scope_json,started_at,status) VALUES ('run-a1','fixture-collector','fixture_source','1','{}','2026-11-09T10:00:00Z','completed')")
-        self.conn.execute("INSERT INTO raw_responses(raw_response_id,run_id,source_id,retrieved_at,request_params_json,payload_json,payload_sha256) VALUES ('raw-a1','run-a1','fixture_source','2026-11-09T10:00:00Z','{}','{}','fixture-hash')")
+        self.conn.execute("INSERT INTO raw_responses(raw_response_id,run_id,source_id,endpoint_id,retrieved_at,payload_json,payload_sha256) VALUES ('raw-a1','run-a1','fixture_source','fixture_endpoint','2026-11-09T10:00:00Z','{}','{}','fixture-hash')")
         register_snapshot_for_records(self.conn, snapshot_id="snap-a1", event_id="snap-a1:registered",
             effective_at="2026-11-09T10:02:30Z", actor_id="test-governance", reason="publish approved fixture snapshot", records=[record])
         grant = authorize_snapshot(self.conn, snapshot_id="snap-a1", records=[record],
@@ -62,7 +62,7 @@ class A13PipelineIntegrationTests(unittest.TestCase):
         self.conn.execute("""INSERT INTO collection_runs(run_id,collector_id,source_id,collector_version,requested_scope_json,started_at,status)
             VALUES ('run-coordinate','fixture-collector','fixture_source','1','{}','2026-11-09T10:00:00Z','completed')""")
         self.conn.execute("""INSERT INTO raw_responses(raw_response_id,run_id,source_id,retrieved_at,request_params_json,payload_json,payload_sha256)
-            VALUES ('raw-coordinate','run-coordinate','fixture_source','2026-11-09T10:00:00Z','{}','{}','fixture-hash')""")
+            VALUES ('raw-coordinate','run-coordinate','fixture_source','fixture_endpoint','2026-11-09T10:00:00Z','{}','{}','fixture-hash')""")
         ctx = DiscoveryContext("solana", MINT, "fixture_source", "fixture_endpoint",
                                "run-coordinate", "raw-coordinate", 4, "2026-11-09T10:00:00Z")
         record = project_a1(normalize_a1(ctx, {"symbol":"SOL"}, field_map={"symbol":"symbol"}))
