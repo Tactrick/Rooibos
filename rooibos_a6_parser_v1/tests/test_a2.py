@@ -115,6 +115,24 @@ class A2Tests(unittest.TestCase):
         with self.assertRaises(ValueError): persist_a2_result(self.db,result=r)
         c=sqlite3.connect(self.db); self.assertEqual(c.execute('SELECT COUNT(*) FROM market_observations').fetchone()[0],0); c.close()
 
+    def test_replay_rejects_same_hash_with_changed_provenance(self):
+        from dataclasses import replace
+        original = normalize_observation(self.item())
+        persist_a2_result(self.db, result=original)
+        forged = replace(
+            original.observations[0],
+            source_id='src2', endpoint_id='ep2', run_id='r2', raw_response_id='raw2',
+        )
+        altered = replace(original, observations=[forged])
+        with self.assertRaisesRegex(ValueError, 'content or provenance'):
+            persist_a2_result(self.db, result=altered)
+        c=sqlite3.connect(self.db)
+        row=c.execute(
+            'SELECT source_id,endpoint_id,run_id,raw_response_id FROM market_observations'
+        ).fetchone()
+        c.close()
+        self.assertEqual(row, ('src1','ep1','r1','raw1'))
+
     def test_append_only_trigger(self):
         r=normalize_observation(self.item()); persist_a2_result(self.db,result=r)
         c=sqlite3.connect(self.db)
