@@ -221,5 +221,178 @@ class SharedCollectorDatabaseRehearsalTests(unittest.TestCase):
             conn.close()
 
 
+    def test_quarantined_a1_does_not_block_or_leak_into_a2_a6_publication(self):
+        # The source is active and its endpoint is approved, but its policy
+        # explicitly excludes A1 discovery. A1 must be retained and quarantined;
+        # A2 and A6 remain eligible under the same shared source registration.
+        mixed_policies = {
+            "fixture_source": SourcePolicy(
+                "fixture_source", ("fixture_endpoint",), True,
+                allowed_dataset_types=("a2_market", "a6_ohlcv"),
+            )
+        }
+        a1_raw = "mixed-raw-a1"
+        a1_run = self._capture(
+            "A1", {"records": [{"symbol": "WITHHELD"}]}, a1_raw,
+            {"scope": "discovery"},
+        )
+
+        def decode_a1(payload, provenance):
+            return [normalize_a1(
+                DiscoveryContext(
+                    "solana", MINT, provenance.source_id, provenance.endpoint_id,
+                    provenance.run_id, provenance.raw_response_id, index,
+                    provenance.retrieved_at, source_record_count=len(payload["records"]),
+                ),
+                row, field_map={"symbol": "symbol"},
+            ) for index, row in enumerate(payload["records"])]
+
+        a1 = process_a1_raw_response(
+            self.framework, run_id=a1_run, raw_response_id=a1_raw,
+            decode_payload=decode_a1, snapshot_id="mixed-snap-a1",
+            source_policies=mixed_policies, **TIMES,
+        )
+        self.assertFalse(a1.published)
+        self.assertEqual(a1.decision.dataset_status, "quarantined")
+
+        a2_raw = "mixed-raw-a2"
+        a2_run = self._capture(
+            "A2", {"records": [{"liquidity": 2345.0}]}, a2_raw,
+            {"scope": "market"},
+        )
+
+        def decode_a2(payload, provenance):
+            return [MarketObservationInput(
+                chain="solana", mint_address=MINT, observed_at=provenance.retrieved_at,
+                source_id=provenance.source_id, endpoint_id=provenance.endpoint_id,
+                run_id=provenance.run_id, raw_response_id=provenance.raw_response_id,
+                source_record_index=index,
+                metrics=(MarketMetricInput("liquidity", row["liquidity"]),),
+                market_scope="token_aggregated",
+                source_record_count=len(payload["records"]),
+            ) for index, row in enumerate(payload["records"])]
+
+        a2 = process_a2_raw_response(
+            self.framework, run_id=a2_run, raw_response_id=a2_raw,
+            decode_payload=decode_a2, snapshot_id="mixed-snap-a2",
+            source_policies=mixed_policies, **TIMES,
+        )
+        self.assertTrue(a2.published)
+
+        a6_raw = "mixed-raw-a6"
+        a6_payload = {
+            "mint": MINT,
+            "records": [
+                {"timestamp_ms": 1794225600000, "open": 1.0, "high": 1.2,
+                 "low": 0.9, "close": 1.1, "volume": 10.0},
+                {"timestamp_ms": 1794226500000, "open": 1.1, "high": 1.3,
+                 "low": 1.0, "close": 1.2, "volume": 12.0},
+            ],
+        }
+        a6_run = self._capture(
+            "A6", a6_payload, a6_raw, {"mint": MINT, "interval": "15m"}
+        )
+        a6_context = ParseContext(
+            chain="solana", asset_id="asset-fixture", mint_address=MINT,
+            interval="15m", source_id="fixture_source",
+            endpoint_id="fixture_endpoint", collection_run_id=a6_run,
+            raw_response_ref=a6_raw, volume_unit="base_token",
+        )
+
+        def decode_a6(payload):
+            return [
+                dict(row, source_record_index=index,
+                     source_record_count=len(payload["records"]),
+                     candle_status="closed")
+                for index, row in enumerate(payload["records"])
+            ]
+
+        a6 = process_a6_raw_response(
+            self.framework, run_id=a6_run, raw_response_id=a6_raw,
+            parse_context=a6_context,
+            request_identity_fields={"mint_address": "mint", "interval": "interval"},
+            response_identity_fields={"mint_address": ("mint",)},
+            decode_payload=decode_a6, snapshot_id="mixed-snap-a6",
+            source_policies=mixed_policies, **TIMES,
+        )
+        self.assertTrue(a6.published)
+        self.assertEqual(len(a6.candle_ids), 2)
+
+        conn = _connect(self.db)
+        try:
+            statuses = {
+                row["run_id"]: row["status"]
+                for row in conn.execute(
+                    "SELECT run_id,status FROM collection_runs WHERE run_id IN (?,?,?)",
+                    (a1_run, a2_run, a6_run),
+                )
+            }
+            self.assertEqual(statuses, {
+                a1_run: "quarantined", a2_run: "completed", a6_run: "completed",
+            })
+
+            # A1's immutable response remains available for audit, but its
+            # quarantined snapshot has no consumer-facing lifecycle/raw links.
+            self.assertEqual(conn.execute(
+                "SELECT COUNT(*) FROM raw_responses WHERE raw_response_id=? AND run_id=?",
+                (a1_raw, a1_run),
+            ).fetchone()[0], 1)
+            self.assertEqual(conn.execute(
+                "SELECT COUNT(*) FROM a13_snapshot_decisions WHERE snapshot_id='mixed-snap-a1'",
+            ).fetchone()[0], 1)
+            self.assertEqual(conn.execute(
+                "SELECT dataset_status FROM a13_snapshot_decisions WHERE snapshot_id='mixed-snap-a1'",
+            ).fetchone()[0], "quarantined")
+            self.assertEqual(conn.execute(
+                "SELECT COUNT(*) FROM a13_snapshot_raw_links WHERE snapshot_id='mixed-snap-a1'",
+            ).fetchone()[0], 0)
+            self.assertEqual(conn.execute(
+                "SELECT COUNT(*) FROM a13_snapshot_evidence_links WHERE snapshot_id='mixed-snap-a1'",
+            ).fetchone()[0], 0)
+            self.assertEqual(conn.execute(
+                "SELECT COUNT(*) FROM a13_snapshot_lifecycle_events WHERE snapshot_id='mixed-snap-a1'",
+            ).fetchone()[0], 0)
+
+            # A2 and A6 each publish only their own raw response and evidence.
+            for snapshot_id, run_id, raw_id in (
+                ("mixed-snap-a2", a2_run, a2_raw),
+                ("mixed-snap-a6", a6_run, a6_raw),
+            ):
+                raw_links = conn.execute(
+                    "SELECT raw_response_id FROM a13_snapshot_raw_links WHERE snapshot_id=?",
+                    (snapshot_id,),
+                ).fetchall()
+                self.assertEqual([row[0] for row in raw_links], [raw_id])
+                evidence_runs = conn.execute(
+                    """SELECT DISTINCT rr.run_id FROM a13_snapshot_evidence_links l
+                       JOIN raw_responses rr ON rr.raw_response_id=l.raw_response_id
+                       WHERE l.snapshot_id=?""", (snapshot_id,),
+                ).fetchall()
+                self.assertTrue(evidence_runs)
+                self.assertEqual({row[0] for row in evidence_runs}, {run_id})
+                self.assertEqual(conn.execute(
+                    """SELECT COUNT(*) FROM a13_snapshot_raw_links
+                       WHERE snapshot_id=? AND raw_response_id=?""",
+                    (snapshot_id, a1_raw),
+                ).fetchone()[0], 0)
+                self.assertEqual(conn.execute(
+                    """SELECT COUNT(*) FROM a13_snapshot_evidence_links
+                       WHERE snapshot_id=? AND raw_response_id=?""",
+                    (snapshot_id, a1_raw),
+                ).fetchone()[0], 0)
+
+            # The quarantined A1 response is never linked by any other snapshot.
+            self.assertEqual(conn.execute(
+                "SELECT COUNT(*) FROM a13_snapshot_raw_links WHERE raw_response_id=?",
+                (a1_raw,),
+            ).fetchone()[0], 0)
+            self.assertEqual(conn.execute(
+                "SELECT COUNT(*) FROM a13_snapshot_evidence_links WHERE raw_response_id=?",
+                (a1_raw,),
+            ).fetchone()[0], 0)
+        finally:
+            conn.close()
+
+
 if __name__ == "__main__":
     unittest.main()
